@@ -1,2 +1,2 @@
 # lockin
-HackPSU Project Monorepo
+HackPSU Project 

@@ -45,12 +45,12 @@ sudo apt-get install -y -qq \
 # ------------------------------------------------------------------
 echo -e "${YELLOW}[2/6] Setting up swap (2GB)...${NC}"
 if [ ! -f /swapfile ]; then
-    sudo fallocate -l 2G /swapfile
+    sudo fallocate -l 4G /swapfile
     sudo chmod 600 /swapfile
     sudo mkswap /swapfile
     sudo swapon /swapfile
     echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
-    echo "  Swap enabled (2GB)"
+    echo "  Swap enabled (4GB)"
 else
     echo "  Swap already exists, skipping"
 fi
@@ -62,8 +62,19 @@ echo -e "${YELLOW}[3/6] Setting up Python environment...${NC}"
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
-pip install --upgrade pip -q
-pip install -r "$APP_DIR/requirements.txt" -q
+pip install --upgrade pip
+
+# Install packages one at a time to avoid OOM on t2.micro (1GB RAM).
+# mediapipe and opencv are the heaviest — installing them separately
+# prevents pip from trying to resolve everything in one huge pass.
+echo "  Installing packages individually (this takes a few minutes on t2.micro)..."
+while IFS= read -r pkg || [ -n "$pkg" ]; do
+    pkg=$(echo "$pkg" | xargs)  # trim whitespace
+    [ -z "$pkg" ] && continue
+    [ "${pkg:0:1}" = "#" ] && continue
+    echo "  -> $pkg"
+    pip install "$pkg" || { echo -e "${RED}  Failed to install $pkg${NC}"; exit 1; }
+done < "$APP_DIR/requirements.txt"
 
 echo "  Installed $(pip list --format=columns | wc -l) packages"
 

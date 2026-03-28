@@ -34,6 +34,14 @@ import time
 import cv2
 import numpy as np
 
+# ── Check dependencies ───────────────────────────────────────────────────────
+try:
+    import mediapipe
+    MEDIAPIPE_OK = True
+except ImportError as e:
+    MEDIAPIPE_OK = False
+    MEDIAPIPE_ERR = str(e)
+
 # ── Paths ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_FRAMES_DIR = os.path.join(SCRIPT_DIR, "test_frames")
@@ -82,12 +90,31 @@ def load_frames_from_dir(directory):
 
 def load_frames_from_video(video_path, fps=10):
     """Extract frames from a video file at the target FPS."""
+    # Normalize path for Windows (OpenCV needs forward slashes or absolute path)
+    video_path = os.path.abspath(video_path)
+    if not os.path.isfile(video_path):
+        print(f"  {FAIL}  File not found: {video_path}")
+        return [], video_path
+
+    file_size = os.path.getsize(video_path)
+    print(f"  {INFO}  File: {video_path} ({file_size / 1024 / 1024:.1f} MB)")
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  {FAIL}  Cannot open video: {video_path}")
+        print(f"  {INFO}  Tip: make sure ffmpeg is installed and the file isn't corrupted")
+        print(f"  {INFO}  Try: pip install opencv-python (not opencv-python-headless) for codec support")
         return [], video_path
 
     native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    duration_s = total_frames / native_fps if native_fps > 0 else 0
+
+    print(f"  {INFO}  Video: {width}x{height}, {native_fps:.1f} fps, "
+          f"{total_frames} frames, {duration_s:.1f}s")
+
     skip = max(1, round(native_fps / fps))
 
     frames = []
@@ -100,6 +127,8 @@ def load_frames_from_video(video_path, fps=10):
             frames.append(frame)
         idx += 1
     cap.release()
+
+    print(f"  {INFO}  Extracted {len(frames)} frames (every {skip} frames, target {fps} fps)")
     return frames, video_path
 
 
@@ -197,6 +226,13 @@ def test_phone_detector(frames, label="test frames"):
     print(f"  PHONE DETECTOR TEST — {label}")
     print(f"{'='*60}")
 
+    if not MEDIAPIPE_OK:
+        print(f"  {FAIL}  mediapipe failed to import: {MEDIAPIPE_ERR}")
+        print(f"  {INFO}  Are you in the project venv? (not conda base)")
+        print(f"  {INFO}  Try: venv\\Scripts\\activate && pip install mediapipe==0.10.21")
+        test_results["failed"] += 1
+        return None
+
     from phone_detector import PhoneDetector
 
     fps = 10.0
@@ -249,6 +285,12 @@ def test_preprocessing(frames, label="test frames"):
     print(f"\n{'='*60}")
     print(f"  PREPROCESSING TEST — {label}")
     print(f"{'='*60}")
+
+    if not MEDIAPIPE_OK:
+        print(f"  {FAIL}  mediapipe failed to import: {MEDIAPIPE_ERR}")
+        print(f"  {INFO}  Skipping preprocessing test")
+        test_results["failed"] += 1
+        return None
 
     from preprocessing import FrameProcessor
 

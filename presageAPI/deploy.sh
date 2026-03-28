@@ -37,7 +37,7 @@ echo -e "${YELLOW}[1/6] Installing system dependencies...${NC}"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
     python3 python3-pip python3-venv python3-dev \
-    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
     ffmpeg curl git
 
 # ------------------------------------------------------------------

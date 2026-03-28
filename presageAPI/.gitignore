@@ -8,7 +8,7 @@ venv/
 dist/
 build/
 .claude/
-*.mp4
+# add back mp4
 *.avi
 *.mov
 tmp/

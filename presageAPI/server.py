@@ -31,6 +31,7 @@ from flask_cors import CORS
 from config import HOST, PORT, PRESAGE_API_KEY
 from preprocessing import FrameProcessor
 from presage_client import PresageClient
+from phone_detector import PhoneDetector
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s [Server] %(message)s",
@@ -62,12 +63,18 @@ def process_frames_async(job_id: str, frames: list, fps: float, api_key: str):
             jobs[job_id]["status"] = "preprocessing"
 
         processor = FrameProcessor(fps=fps)
-        for frame in frames:
+        phone_detector = PhoneDetector(fps=fps)
+        frame_interval = 1.0 / fps
+        for i, frame in enumerate(frames):
             processor.process_frame(frame)
+            phone_detector.detect(frame, i * frame_interval)
+
+        phone_summary = phone_detector.get_summary()
 
         with jobs_lock:
             jobs[job_id]["status"] = "uploading"
             jobs[job_id]["frames_processed"] = len(frames)
+            jobs[job_id]["phone_detection"] = phone_summary
 
         client = PresageClient(api_key=api_key)
         compressed = processor.get_compressed_trace()
@@ -303,17 +310,22 @@ def process_sync():
         return jsonify({"error": f"Need at least 5 frames, got {len(frames)}"}), 400
 
     processor = FrameProcessor(fps=fps)
-    for frame in frames:
+    phone_detector = PhoneDetector(fps=fps)
+    frame_interval = 1.0 / fps
+    for i, frame in enumerate(frames):
         processor.process_frame(frame)
+        phone_detector.detect(frame, i * frame_interval)
+
+    phone_summary = phone_detector.get_summary()
 
     client = PresageClient(api_key=api_key)
     compressed = processor.get_compressed_trace()
 
     try:
         results = client.process_and_get_results(compressed, process_type="all", timeout=300)
-        return jsonify({"status": "complete", "results": results})
+        return jsonify({"status": "complete", "results": results, "phone_detection": phone_summary})
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return jsonify({"status": "error", "error": str(e), "phone_detection": phone_summary}), 500
 
 
 @app.route("/api/status/<job_id>", methods=["GET"])

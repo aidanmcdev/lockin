@@ -17,6 +17,7 @@ import cv2
 from config import PRESAGE_API_KEY
 from preprocessing import FrameProcessor
 from presage_client import PresageClient
+from phone_detector import PhoneDetector
 
 
 def capture_and_process(duration: int = 30, fps: float = 10.0, camera_index: int = 0):
@@ -32,6 +33,7 @@ def capture_and_process(duration: int = 30, fps: float = 10.0, camera_index: int
     print("Press 'q' to stop early.\n")
 
     processor = FrameProcessor(fps=fps)
+    phone_detector = PhoneDetector(fps=fps)
     frame_interval = 1.0 / fps
     start_time = time.time()
     last_capture = 0
@@ -57,11 +59,15 @@ def capture_and_process(duration: int = 30, fps: float = 10.0, camera_index: int
 
         last_capture = elapsed
         processor.process_frame(frame)
+        phone_result = phone_detector.detect(frame, elapsed)
         frames_captured += 1
 
-        # Show progress
+        # Show progress with phone status
         remaining = duration - int(elapsed)
-        sys.stdout.write(f"\rFrames: {frames_captured} | Time remaining: {remaining}s  ")
+        phone_status = ""
+        if phone_result["phone_detected"]:
+            phone_status = f" | PHONE: {phone_result['posture'].upper()}"
+        sys.stdout.write(f"\rFrames: {frames_captured} | Time remaining: {remaining}s{phone_status}  ")
         sys.stdout.flush()
 
         cv2.imshow("Presage Webcam - Press Q to stop", frame)
@@ -82,15 +88,34 @@ def capture_and_process(duration: int = 30, fps: float = 10.0, camera_index: int
     compressed = processor.get_compressed_trace()
     print(f"Trace size: {len(compressed)} bytes (compressed)")
 
+    phone_summary = phone_detector.get_summary()
+
     try:
         results = client.process_and_get_results(compressed, process_type="all", timeout=300)
-        print_results(results)
+        print_results(results, phone_summary)
     except Exception as e:
         print(f"ERROR: {e}")
+        # Still print phone detection even if Presage API fails
+        print_phone_results(phone_summary)
         sys.exit(1)
 
 
-def print_results(results: dict):
+def print_phone_results(phone_summary: dict):
+    """Print phone detection results."""
+    print("\n" + "-" * 60)
+    print("  PHONE DETECTION")
+    print("-" * 60)
+    if phone_summary["on_phone"]:
+        print(f"  Phone Usage Detected: YES")
+        print(f"  Total Phone Time: {phone_summary['total_phone_seconds']}s")
+        for ev in phone_summary["events"]:
+            print(f"    {ev['start']}s - {ev['end']}s  ({ev['type']}, {ev['duration']}s)")
+    else:
+        print(f"  Phone Usage Detected: NO")
+    print("-" * 60)
+
+
+def print_results(results: dict, phone_summary: dict = None):
     """Pretty-print vitals results to terminal."""
     print("\n" + "=" * 60)
     print("  PRESAGE VITALS RESULTS")
@@ -143,6 +168,9 @@ def print_results(results: dict):
         print(json.dumps(data, indent=2, default=str)[:3000])
 
     print("=" * 60)
+
+    if phone_summary:
+        print_phone_results(phone_summary)
 
 
 def flatten_dict(d, parent_key=""):

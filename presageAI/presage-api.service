@@ -1,0 +1,18 @@
+[Unit]
+Description=Presage API Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/presageAI
+Environment=PATH=/home/ubuntu/presageAI/venv/bin:/usr/bin
+EnvironmentFile=/home/ubuntu/presageAI/.env
+ExecStart=/home/ubuntu/presageAI/venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 4 --timeout 600 server:app
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

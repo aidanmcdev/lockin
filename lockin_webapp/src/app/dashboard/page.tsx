@@ -35,10 +35,81 @@ function getGreeting(streak: number, avg: number): { text: string; emoji: string
   return { text: "Welcome back! Ready to lock in?", emoji: "👋" };
 }
 
+/* ── Demo data generator ───────────────────────────────────── */
+
+const ACTIVITY_MODES = ["lecture", "video", "notes"] as const;
+
+function generateDemoEvents(durationMinutes: number) {
+  const totalSeconds = durationMinutes * 60;
+  const events: { type: string; timestamp?: number; duration?: number }[] = [
+    { type: "session_start", timestamp: 0 },
+  ];
+  let t = 30 + Math.floor(Math.random() * 60);
+  while (t < totalSeconds - 30) {
+    const roll = Math.random();
+    if (roll < 0.15) {
+      const dur = 5 + Math.floor(Math.random() * 20);
+      events.push({ type: "phone_detected", timestamp: t, duration: dur });
+      t += dur + 10;
+      events.push({ type: "refocus", timestamp: t });
+    } else if (roll < 0.4) {
+      const dur = 10 + Math.floor(Math.random() * 35);
+      events.push({ type: "distraction", timestamp: t, duration: dur });
+      t += dur + 5;
+      events.push({ type: "refocus", timestamp: t });
+    }
+    t += 60 + Math.floor(Math.random() * 120);
+  }
+  events.push({ type: "session_end", timestamp: totalSeconds });
+  return events;
+}
+
+function buildDemoData(): DashboardData {
+  const sessions: DashboardData["sessions"] = [];
+  for (let i = 13; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    const duration = Math.round(20 + Math.random() * 100);
+    const attentionScore = Math.round(55 + Math.random() * 40);
+    sessions.push({
+      _id: `demo-${i}`,
+      date: date.toISOString(),
+      attentionScore,
+      duration,
+      activityMode: ACTIVITY_MODES[Math.floor(Math.random() * 3)],
+      events: generateDemoEvents(duration),
+    });
+  }
+
+  const totalFocusMinutes = sessions.reduce((s, x) => s + x.duration, 0);
+  const avgAttention = Math.round(
+    sessions.reduce((s, x) => s + x.attentionScore, 0) / sessions.length
+  );
+  const totalPhonePickups = sessions.reduce(
+    (s, x) => s + (x.events?.filter((e) => e.type === "phone_detected").length ?? 0),
+    0
+  );
+
+  return {
+    stats: {
+      totalSessions: sessions.length,
+      avgAttention,
+      totalFocusMinutes,
+      currentStreak: 7,
+      totalPhonePickups,
+    },
+    sessions,
+  };
+}
+
+/* ────────────────────────────────────────────────────────────── */
+
 export default function DashboardPage() {
   const router = useRouter();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [demo, setDemo] = useState(false);
+  const [realData, setRealData] = useState<DashboardData | null>(null);
 
   useEffect(() => {
     const token = getToken();
@@ -53,7 +124,9 @@ export default function DashboardPage() {
           fetchWithAuth("/dashboard/stats"),
           fetchWithAuth("/dashboard/sessions"),
         ]);
-        setData({ stats, sessions });
+        const d = { stats, sessions };
+        setRealData(d);
+        setData(d);
       } catch {
         // fetchWithAuth handles 401 redirect
       } finally {
@@ -63,6 +136,16 @@ export default function DashboardPage() {
 
     loadData();
   }, [router]);
+
+  function toggleDemo() {
+    if (demo) {
+      setData(realData);
+      setDemo(false);
+    } else {
+      setData(buildDemoData());
+      setDemo(true);
+    }
+  }
 
   function handleLogout() {
     removeToken();
@@ -126,6 +209,29 @@ export default function DashboardPage() {
           </>
         )}
       </main>
+
+      {/* Demo toggle — bottom-left */}
+      <button
+        onClick={toggleDemo}
+        className={`fixed bottom-4 left-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg border transition-colors ${
+          demo
+            ? "bg-purple-600 text-white border-purple-700 hover:bg-purple-700"
+            : "bg-white text-foreground/60 border-gray-200 hover:bg-gray-50"
+        }`}
+      >
+        <span
+          className={`inline-block w-7 h-4 rounded-full relative transition-colors ${
+            demo ? "bg-purple-300" : "bg-gray-300"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${
+              demo ? "translate-x-3.5" : "translate-x-0.5"
+            }`}
+          />
+        </span>
+        Demo
+      </button>
     </div>
   );
 }

@@ -4,6 +4,7 @@
  * Processes a video file through the Presage SmartSpectra C++ SDK
  * and outputs vitals as JSON to stdout.
  *
+ * Uses Spot mode — processes the entire video as one batch for best results.
  * Extracts: pulse rate, breathing rate, HRV, stress index.
  *
  * Usage:
@@ -34,12 +35,13 @@ namespace settings = presage::smartspectra::container::settings;
 
 ABSL_FLAG(std::string, input_video_path, "", "Path to video file to process.");
 ABSL_FLAG(std::string, api_key, "", "Presage API key. Falls back to SMARTSPECTRA_API_KEY env var.");
+ABSL_FLAG(double, spot_duration, 0, "Spot duration in seconds. 0 = auto (use video length).");
 
-// Holds all metrics snapshots received during processing
+// Holds metrics received during processing
 struct MetricsCollector {
     std::mutex mtx;
-    std::vector<std::string> snapshots; // raw JSON from each callback
-    std::string latest_raw;             // last full protobuf JSON for debug
+    std::vector<std::string> snapshots;
+    std::string latest_raw;
 };
 
 int main(int argc, char** argv) {
@@ -54,6 +56,7 @@ int main(int argc, char** argv) {
 
     std::string video_path = absl::GetFlag(FLAGS_input_video_path);
     std::string api_key = absl::GetFlag(FLAGS_api_key);
+    double spot_duration = absl::GetFlag(FLAGS_spot_duration);
 
     if (api_key.empty()) {
         const char* env_key = std::getenv("SMARTSPECTRA_API_KEY");
@@ -73,20 +76,39 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // Configure SDK
-    settings::Settings<settings::OperationMode::Continuous, settings::IntegrationMode::Rest> s;
+    // Get video duration to set spot_duration if not specified
+    if (spot_duration <= 0) {
+        cv::VideoCapture cap(video_path);
+        if (cap.isOpened()) {
+            double fps = cap.get(cv::CAP_PROP_FPS);
+            double frame_count = cap.get(cv::CAP_PROP_FRAME_COUNT);
+            if (fps > 0 && frame_count > 0) {
+                spot_duration = frame_count / fps;
+            }
+            cap.release();
+        }
+        if (spot_duration <= 0) spot_duration = 60.0;
+        LOG(INFO) << "Auto spot duration: " << spot_duration << "s";
+    }
+
+    // Use Spot mode — processes entire video as one batch
+    settings::Settings<settings::OperationMode::Spot, settings::IntegrationMode::Rest> s;
     s.video_source.input_video_path = video_path;
     s.headless = true;
     s.start_with_recording_on = true;
     s.interframe_delay_ms = 1;
     s.scale_input = true;
     s.binary_graph = true;
-    s.enable_edge_metrics = true;  // enable for richer per-frame data
+    s.enable_edge_metrics = false;
     s.verbosity_level = 1;
-    s.continuous.preprocessed_data_buffer_duration_s = 0.2;
+
+    // Spot mode: process the full video duration at once
+    s.spot.spot_duration_s = spot_duration;
+
+    // REST integration
     s.integration.api_key = api_key;
 
-    spectra::container::CpuContinuousRestForegroundContainer container(s);
+    spectra::container::CpuSpotRestForegroundContainer container(s);
 
     MetricsCollector collector;
 
@@ -98,7 +120,7 @@ int main(int argc, char** argv) {
         }
     );
 
-    // Core metrics callback — cloud-processed vitals (pulse, breathing, HRV, stress, BP)
+    // Core metrics callback — cloud-processed vitals
     if (status.ok()) {
         status = container.SetOnCoreMetricsOutput(
             [&collector](
@@ -107,7 +129,6 @@ int main(int argc, char** argv) {
             ) {
                 std::lock_guard<std::mutex> lock(collector.mtx);
 
-                // Get full JSON dump of this metrics buffer
                 collector.latest_raw.clear();
                 google::protobuf::util::JsonPrintOptions options;
                 options.add_whitespace = false;
@@ -119,16 +140,6 @@ int main(int argc, char** argv) {
                 LOG(INFO) << "Core metrics received at t=" << timestamp_ms
                           << "ms (snapshot #" << collector.snapshots.size() << ")";
 
-                return absl::OkStatus();
-            }
-        );
-    }
-
-    // Edge metrics callback — per-frame computed data
-    if (status.ok()) {
-        status = container.SetOnEdgeMetricsOutput(
-            [](const presage::physiology::Metrics& metrics, int64_t timestamp_ms) {
-                // We just log these — core metrics have the refined vitals
                 return absl::OkStatus();
             }
         );
@@ -160,19 +171,13 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Output all snapshots so the server can pick the best one,
-    // plus the latest as the primary result
+    // Output the latest (most complete) snapshot plus count
     std::ostringstream out;
     out << "{";
     out << "\"status\": \"complete\",";
     out << "\"snapshot_count\": " << collector.snapshots.size() << ",";
-    out << "\"latest\": " << collector.latest_raw << ",";
-    out << "\"all_snapshots\": [";
-    for (size_t i = 0; i < collector.snapshots.size(); i++) {
-        if (i > 0) out << ",";
-        out << collector.snapshots[i];
-    }
-    out << "]}";
+    out << "\"latest\": " << collector.latest_raw;
+    out << "}";
 
     std::cout << out.str() << std::endl;
     return EXIT_SUCCESS;

@@ -18,16 +18,16 @@ const EYE_TILT_THRESHOLD = 0.20;
 const MIN_FACE_WIDTH_RATIO = 0.10;
 
 const focusMessages = [
-  "Let's refocus. What's the next step?",
-  "Stay with the task. You've got this.",
-  "Looks like you're drifting. Come back to it.",
-  "Let's lock back in.",
-  "Focus up. One step at a time.",
-  "Back to work. Start small.",
-  "Don't break momentum. Keep going.",
-  "Stay on track. What's next?",
-  "Return to the task in front of you.",
-  "Bring your attention back."
+  "Hey, I noticed you drifted. That's okay — it happens. Come on back when you're ready.",
+  "You were doing really well. Let's get back to it together.",
+  "It's easy to lose focus. Take a breath, and let's pick up where you left off.",
+  "I know this might be hard right now, but you're closer than you think. Keep going.",
+  "Just a gentle reminder — your work matters. Let's give it your attention.",
+  "You don't have to be perfect. Just present. Come back to the task.",
+  "It's okay to struggle. What matters is coming back. You've got this.",
+  "I believe you can finish this. Let's take it one small step at a time.",
+  "Hey — no judgment. Let's just refocus and keep moving forward.",
+  "You started this for a reason. That reason hasn't changed. Come back to it."
 ];
 
 function nowSeconds() {
@@ -95,11 +95,8 @@ async function setupCamera() {
   });
 }
 
-function drawStatus(text, color) {
+function drawStatus(text) {
   statusEl.textContent = text;
-  ctx.font = "28px Arial";
-  ctx.fillStyle = color;
-  ctx.fillText(text, 20, 40);
 }
 
 function drawPoint(x, y, color = "yellow") {
@@ -210,6 +207,9 @@ function analyzeDetection(detection) {
 async function handleFocusState(distracted) {
   const now = nowSeconds();
 
+  // Update the cloud widget reactively
+  if (window.setFocusState) window.setFocusState(!distracted);
+
   if (distracted) {
     if (lookAwayStart === null) {
       lookAwayStart = now;
@@ -272,13 +272,6 @@ async function start() {
       statusText   = analysis.reason;
       statusColor  = distracted ? "red" : "lime";
 
-      // Debug overlay
-      ctx.font = "20px Arial";
-      ctx.fillStyle = "white";
-      ctx.fillText(`eyeBalance:      ${analysis.eyeBalance.toFixed(3)}`,      20, 75);
-      ctx.fillText(`noseFaceRatioX:  ${analysis.noseFaceRatioX.toFixed(3)}`,  20, 100);
-      ctx.fillText(`eyeTilt:         ${analysis.eyeTilt.toFixed(3)}`,         20, 125);
-      ctx.fillText(`faceWidthRatio:  ${analysis.faceWidthRatio.toFixed(3)}`,  20, 150);
     } else {
       distracted  = true;
       statusText  = "No Face Detected";
@@ -286,7 +279,7 @@ async function start() {
     }
 
     await handleFocusState(distracted);
-    drawStatus(statusText, statusColor);
+    drawStatus(statusText);
 
     requestAnimationFrame(loop);
   }

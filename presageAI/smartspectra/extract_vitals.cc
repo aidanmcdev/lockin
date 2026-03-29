@@ -36,7 +36,6 @@ namespace settings = presage::smartspectra::container::settings;
 
 ABSL_FLAG(std::string, input_video_path, "", "Path to video file to process.");
 ABSL_FLAG(std::string, api_key, "", "Presage API key. Falls back to SMARTSPECTRA_API_KEY env var.");
-ABSL_FLAG(double, buffer_duration, 30.0, "Preprocessed data buffer duration in seconds.");
 
 // Holds metrics received during processing
 struct MetricsCollector {
@@ -57,8 +56,6 @@ int main(int argc, char** argv) {
 
     std::string video_path = absl::GetFlag(FLAGS_input_video_path);
     std::string api_key = absl::GetFlag(FLAGS_api_key);
-    double buffer_duration = absl::GetFlag(FLAGS_buffer_duration);
-
     if (api_key.empty()) {
         const char* env_key = std::getenv("SMARTSPECTRA_API_KEY");
         if (env_key) api_key = env_key;
@@ -77,23 +74,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // Auto-detect video duration and set buffer to match (process as one chunk)
-    {
-        cv::VideoCapture cap(video_path);
-        if (cap.isOpened()) {
-            double fps = cap.get(cv::CAP_PROP_FPS);
-            double frame_count = cap.get(cv::CAP_PROP_FRAME_COUNT);
-            if (fps > 0 && frame_count > 0) {
-                double video_duration = frame_count / fps;
-                // Set buffer to entire video duration + margin so it sends as one chunk
-                buffer_duration = video_duration + 5.0;
-                LOG(INFO) << "Video duration: " << video_duration << "s, buffer set to: " << buffer_duration << "s";
-            }
-            cap.release();
-        }
-    }
-
-    // Continuous mode with large buffer — sends all data as one chunk
+    // Continuous mode — small buffer sends data frequently, API accumulates
     settings::Settings<settings::OperationMode::Continuous, settings::IntegrationMode::Rest> s;
     s.video_source.input_video_path = video_path;
     s.headless = true;
@@ -104,8 +85,8 @@ int main(int argc, char** argv) {
     s.enable_edge_metrics = false;
     s.verbosity_level = 1;
 
-    // Set buffer to entire video so it processes as one batch
-    s.continuous.preprocessed_data_buffer_duration_s = buffer_duration;
+    // Small buffer — the API accumulates data across multiple uploads
+    s.continuous.preprocessed_data_buffer_duration_s = 0.2;
 
     // REST integration
     s.integration.api_key = api_key;

@@ -34,12 +34,154 @@ function sendFetchError(sendResponse, err) {
   })
 }
 
-/**
- * Vitals API traffic from the panel: multipart POST and GET poll must run here so
- * HTTPS pages are not blocked from calling http:// Presage (mixed content).
- */
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// ============================================================================
+// Socket.io streaming — managed in background worker to avoid mixed-content
+// ============================================================================
+
+importScripts("socket.io.min.js")
+
+const PRESAGE_ORIGIN = "https://distal-nisha-trigonometrically.ngrok-free.dev"
+let presageSocket = null
+let streamSenderTabId = null
+
+function broadcastToAllTabs(message) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id) {
+        chrome.tabs.sendMessage(tab.id, message).catch(() => {})
+      }
+    }
+  })
+}
+
+function startPresageStream(fps) {
+  if (presageSocket) {
+    presageSocket.disconnect()
+    presageSocket = null
+  }
+
+  try {
+    presageSocket = io(PRESAGE_ORIGIN, {
+      transports: ["websocket"],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
+    })
+
+    presageSocket.on("connect", () => {
+      console.log("[presage-bg] connected, starting stream at", fps, "fps")
+      presageSocket.emit("start_stream", { fps })
+    })
+
+    presageSocket.on("disconnect", (reason) => {
+      console.log("[presage-bg] disconnected:", reason)
+      broadcastToAllTabs({ type: "LOCKIN_PRESAGE_STREAM_DISCONNECTED" })
+    })
+
+    presageSocket.on("connect_error", (err) => {
+      console.error("[presage-bg] connection error:", err.message)
+      broadcastToAllTabs({
+        type: "LOCKIN_PRESAGE_STREAM_ERROR",
+        message: "Connection failed: " + err.message,
+      })
+    })
+
+    presageSocket.on("stream_started", (data) => {
+      console.log("[presage-bg] stream started:", data.session_id)
+      broadcastToAllTabs({
+        type: "LOCKIN_PRESAGE_STREAM_STARTED",
+        session_id: data.session_id,
+      })
+    })
+
+    presageSocket.on("vitals_update", (data) => {
+      broadcastToAllTabs({
+        type: "LOCKIN_PRESAGE_STREAM_VITALS",
+        payload: data,
+      })
+    })
+
+    presageSocket.on("attentiveness_update", (data) => {
+      broadcastToAllTabs({
+        type: "LOCKIN_PRESAGE_STREAM_ATTENTIVENESS",
+        payload: data,
+      })
+    })
+
+    presageSocket.on("stream_stopped", (data) => {
+      console.log("[presage-bg] stream stopped")
+      broadcastToAllTabs({
+        type: "LOCKIN_PRESAGE_STREAM_STOPPED",
+        payload: data.final_results,
+      })
+    })
+
+    presageSocket.on("error", (data) => {
+      broadcastToAllTabs({
+        type: "LOCKIN_PRESAGE_STREAM_ERROR",
+        message: data.message || "Unknown server error",
+      })
+    })
+  } catch (err) {
+    console.error("[presage-bg] failed to create socket:", err)
+    broadcastToAllTabs({
+      type: "LOCKIN_PRESAGE_STREAM_ERROR",
+      message: "Failed to create socket: " + (err.message || String(err)),
+    })
+  }
+}
+
+function sendPresageFrame(base64Jpeg) {
+  if (presageSocket && presageSocket.connected) {
+    presageSocket.emit("frame", { data: base64Jpeg })
+  }
+}
+
+function stopPresageStream() {
+  if (presageSocket) {
+    if (presageSocket.connected) {
+      presageSocket.emit("stop_stream")
+    }
+    // Give server time to send final results before disconnecting
+    setTimeout(() => {
+      if (presageSocket) {
+        presageSocket.disconnect()
+        presageSocket = null
+      }
+    }, 3000)
+  }
+}
+
+// ============================================================================
+// Message handler — vitals API traffic + streaming
+// ============================================================================
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const t = message?.type
+
+  // --- Streaming messages ---
+
+  if (t === "LOCKIN_PRESAGE_STREAM_START") {
+    const fps = typeof message.fps === "number" ? message.fps : 5
+    streamSenderTabId = sender.tab?.id ?? null
+    startPresageStream(fps)
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (t === "LOCKIN_PRESAGE_STREAM_FRAME") {
+    sendPresageFrame(message.data)
+    // No response needed for frames — fire and forget
+    return false
+  }
+
+  if (t === "LOCKIN_PRESAGE_STREAM_STOP") {
+    stopPresageStream()
+    sendResponse({ ok: true })
+    return true
+  }
+
+  // --- Existing batch upload messages ---
 
   if (t === "LOCKIN_PROCESS_SYNC_UPLOAD") {
     const { url, buffer, mimeType, filename, fps, method } = message

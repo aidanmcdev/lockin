@@ -27,13 +27,15 @@ import {
   STEADY_DISTRACTED_NUDGE_MS,
   type FocusDebugSnapshot,
 } from "@/focusDetection"
-import { startMinuteChunkRecorder } from "@/lib/minuteChunkRecorder"
 import {
-  filenameForProcessSyncBlob,
-  parseProcessSyncResponse,
-  uploadProcessSyncVideo,
   type ProcessSyncParsed,
 } from "@/lib/processSyncApi"
+import {
+  PresageStreamClient,
+  startPresageFrameStream,
+  type VitalsUpdatePayload,
+  type AttentivenessUpdatePayload,
+} from "@/lib/presageStream"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   hydrateWidgetState,
@@ -203,7 +205,7 @@ export function FocusWidget({
     [],
   )
   const [vitalsLiveTick, setVitalsLiveTick] = useState(0)
-  const vitalsUploadChainRef = useRef(Promise.resolve())
+  // vitalsUploadChainRef removed — streaming mode doesn't need upload chaining
 
   const safeGraceTotal = Math.max(1, graceTotal)
 
@@ -345,7 +347,7 @@ export function FocusWidget({
     vitalsRecordingStartedAt,
   ])
 
-  /** ~1-minute **H.264/MP4** chunks when supported → `POST /api/process-sync` (vitals APIs often require avc1). */
+  /** Real-time frame streaming via socket.io → Presage SmartSpectra C++ SDK. */
   useEffect(() => {
     if (!enableCameraFocusDetection || !pastGettingStarted) {
       setVitalsSyncPhase("idle")
@@ -356,113 +358,92 @@ export function FocusWidget({
       return
     }
 
-    if (typeof MediaRecorder === "undefined") {
-      setVitalsSyncError("Video recording is not supported in this browser.")
-      setVitalsSyncPhase("idle")
-      setVitalsWaitCameraStartedAt(null)
-      setVitalsRecordingStartedAt(null)
-      setVitalsSegmentStartedAt(null)
-      return
-    }
-
     setVitalsSyncPhase("waiting_camera")
     setVitalsSyncError(null)
     setVitalsWaitCameraStartedAt(Date.now())
     setVitalsRecordingStartedAt(null)
     setVitalsSegmentStartedAt(null)
     setVitalsUploadLog([])
-    vitalsUploadChainRef.current = Promise.resolve()
 
-    const stopRecorder = startMinuteChunkRecorder({
-      getStream: () => {
-        const v = getFocusDetectionVideo()
-        return (v?.srcObject as MediaStream | null) ?? null
-      },
-      intervalMs: VITALS_SEGMENT_MS,
-      onRecordingStarted: () => {
+    let streamSnapshotIndex = 0
+
+    const client = new PresageStreamClient({
+      onStreamStarted: () => {
         const t = Date.now()
         setVitalsWaitCameraStartedAt(null)
         setVitalsRecordingStartedAt(t)
         setVitalsSegmentStartedAt(t)
         setVitalsSyncPhase("recording")
+        setVitalsSyncError(null)
+        console.log("[vitals-stream] stream started")
       },
-      onChunk: (blob, { index, fps }) => {
-        const segmentBoundaryAt = Date.now()
-        setVitalsSegmentStartedAt(segmentBoundaryAt)
-
-        console.log("[vitals-sync] video segment blob", {
-          chunkIndex: index,
-          fps,
-          sizeBytes: blob.size,
-          type: blob.type,
-          blob,
+      onVitalsUpdate: (payload: VitalsUpdatePayload) => {
+        streamSnapshotIndex++
+        const vitalsRows = Object.entries(payload.vitals)
+          .filter(([, v]) => v !== null && v !== undefined)
+          .map(([k, v]) => ({
+            label: k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+            value: typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : String(v ?? "—"),
+          }))
+        setVitalsSyncSnapshot({
+          attentiveness: null,
+          vitalsRows,
+          chunkIndex: streamSnapshotIndex,
+          recordedAt: Date.now(),
+          segmentFps: 5,
+          segmentUploadFps: 5,
+          segmentMimeType: "stream",
+          segmentFilename: "live-stream",
         })
-
-        vitalsUploadChainRef.current = vitalsUploadChainRef.current.then(
-          async () => {
-            setVitalsSyncPhase("uploading")
-            const bytes = blob.size
-            const finishedAt = Date.now()
-            const segmentFilename = filenameForProcessSyncBlob(blob)
-            const segmentMimeType = blob.type?.trim() || "—"
-            try {
-              const raw = await uploadProcessSyncVideo(blob, { fps })
-              const parsed = parseProcessSyncResponse(raw)
-              setVitalsSyncSnapshot({
-                ...parsed,
-                chunkIndex: index,
-                recordedAt: finishedAt,
-                segmentFps: fps,
-                segmentUploadFps: fps,
-                segmentMimeType,
-                segmentFilename,
-              })
-              setVitalsSyncError(null)
-              setVitalsUploadLog((prev) =>
-                [
-                  {
-                    chunkIndex: index,
-                    ok: true,
-                    finishedAt,
-                    bytes,
-                    fps,
-                    mimeType: segmentMimeType,
-                    filename: segmentFilename,
-                  },
-                  ...prev,
-                ].slice(0, 20),
-              )
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              setVitalsSyncError(msg)
-              setVitalsUploadLog((prev) =>
-                [
-                  {
-                    chunkIndex: index,
-                    ok: false,
-                    finishedAt,
-                    bytes,
-                    fps,
-                    mimeType: segmentMimeType,
-                    filename: segmentFilename,
-                    errorMessage: msg,
-                  },
-                  ...prev,
-                ].slice(0, 20),
-              )
-            } finally {
-              setVitalsSyncPhase("recording")
-            }
-          },
-        )
+        setVitalsSyncError(null)
       },
-      onError: (err) => {
-        setVitalsSyncError(err instanceof Error ? err.message : String(err))
+      onAttentivenessUpdate: (payload: AttentivenessUpdatePayload) => {
+        const att = payload.attentiveness
+        const label = `Score ${att.score} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
+        const vitalsRows: { label: string; value: string }[] = []
+        if (att.sub_scores) {
+          for (const [key, val] of Object.entries(att.sub_scores)) {
+            vitalsRows.push({
+              label: `Attentiveness · ${key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`,
+              value: typeof val.detail === "string" ? `${val.score} — ${val.detail}` : String(val.score),
+            })
+          }
+        }
+        setVitalsSyncSnapshot((prev) => ({
+          ...(prev ?? { vitalsRows: [], chunkIndex: 0, recordedAt: Date.now(), segmentFps: 5, segmentUploadFps: 5, segmentMimeType: "stream", segmentFilename: "live-stream" }),
+          attentiveness: label,
+          vitalsRows: [
+            ...(prev?.vitalsRows ?? []),
+            ...vitalsRows,
+          ],
+        }))
+      },
+      onError: (message: string) => {
+        console.error("[vitals-stream] error:", message)
+        setVitalsSyncError(message)
+      },
+      onConnectionChange: (connected: boolean) => {
+        if (!connected) {
+          setVitalsSyncPhase("idle")
+        }
       },
     })
 
+    client.start(5)
+
+    const stopFrameCapture = startPresageFrameStream({
+      getVideo: getFocusDetectionVideo,
+      client,
+      fps: 5,
+      jpegQuality: 0.7,
+      maxFrameWidth: 640,
+    })
+
     return () => {
-      stopRecorder()
+      stopFrameCapture()
+      client.stop()
+      // Give the server a moment to send final results before disconnecting
+      setTimeout(() => client.destroy(), 2000)
       setVitalsSyncPhase("idle")
       setVitalsWaitCameraStartedAt(null)
       setVitalsRecordingStartedAt(null)

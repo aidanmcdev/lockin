@@ -6,7 +6,7 @@
  */
 export const PRESAGE_PROCESS_SYNC_PATH = "/api/process-sync" as const
 
-const DEFAULT_PRESAGE_ORIGIN = "http://3.237.198.19:5000"
+const DEFAULT_PRESAGE_ORIGIN = "https://distal-nisha-trigonometrically.ngrok-free.dev"
 
 function resolveProcessSyncUrl(envUrl: string | undefined): string {
   const fallback = `${DEFAULT_PRESAGE_ORIGIN}${PRESAGE_PROCESS_SYNC_PATH}`

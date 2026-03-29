@@ -1,2 +1,0 @@
-# lockin
-HackPSU Project 

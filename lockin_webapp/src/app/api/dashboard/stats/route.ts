@@ -32,6 +32,12 @@ export async function GET(req: NextRequest) {
       0
     );
 
+    // Average site productivity score across all sessions
+    const allSiteScores = sessions.flatMap((s) => (s.siteScores || []).map((ss: { score: number }) => ss.score));
+    const avgProductivity = allSiteScores.length > 0
+      ? allSiteScores.reduce((sum: number, s: number) => sum + s, 0) / allSiteScores.length
+      : null;
+
     let currentStreak = 0;
     if (totalSessions > 0) {
       const sorted = sessions
@@ -59,6 +65,7 @@ export async function GET(req: NextRequest) {
       totalFocusMinutes,
       currentStreak,
       totalPhonePickups,
+      avgProductivity,
     });
   } catch (error) {
     console.error("API error:", error);

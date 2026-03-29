@@ -330,5 +330,105 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true
   }
 
+  // --- Website productivity scoring ---
+
+  if (t === "LOCKIN_RATE_WEBSITE") {
+    const { tabId, url, token, geminiApiKey } = message
+    if (!url || !tabId) {
+      sendResponse({ ok: false, error: "tabId and url required" })
+      return true
+    }
+
+    ;(async () => {
+      try {
+        // 1. Check cache via backend
+        const cacheRes = await fetch(
+          `https://lockin-swart.vercel.app/api/site-score?url=${encodeURIComponent(url)}`
+        )
+        if (cacheRes.ok) {
+          const cacheData = await cacheRes.json()
+          if (cacheData.cached) {
+            sendResponse({ ok: true, score: cacheData.score, cached: true })
+            return
+          }
+        }
+
+        // 2. Get DOM content from the tab's content script
+        let pageContent
+        try {
+          pageContent = await chrome.tabs.sendMessage(tabId, { type: "LOCKIN_GET_PAGE_CONTENT" })
+        } catch (err) {
+          sendResponse({ ok: false, error: "Could not get page content: " + (err.message || String(err)) })
+          return
+        }
+
+        if (!pageContent?.ok) {
+          sendResponse({ ok: false, error: "Content script returned no data" })
+          return
+        }
+
+        // 3. Call Gemini API
+        const GEMINI_API_KEY = geminiApiKey
+        if (!GEMINI_API_KEY) {
+          sendResponse({ ok: false, error: "Gemini API key not configured (set VITE_GEMINI_API_KEY in .env)" })
+          return
+        }
+        const prompt = `You are a productivity analyst. Rate the following website on a scale of 0 to 10 for productivity, where 0 is completely unproductive (entertainment, social media, gaming) and 10 is highly productive (educational resources, work tools, documentation).
+
+Website URL: ${pageContent.url}
+Page Title: ${pageContent.title}
+Meta Description: ${pageContent.metaDesc}
+Page Content (excerpt): ${pageContent.bodyText}
+
+Respond with ONLY a single integer from 0 to 10. Nothing else.`
+
+        const geminiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+            }),
+          }
+        )
+
+        if (!geminiRes.ok) {
+          const errText = await geminiRes.text().catch(() => "")
+          sendResponse({ ok: false, error: "Gemini API error: " + geminiRes.status + " " + errText })
+          return
+        }
+
+        const geminiData = await geminiRes.json()
+        const responseText =
+          geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || ""
+        const score = parseInt(responseText.trim(), 10)
+
+        if (isNaN(score) || score < 0 || score > 10) {
+          sendResponse({ ok: false, error: "Could not parse score from Gemini response: " + responseText })
+          return
+        }
+
+        // 4. Cache the score via backend
+        if (token) {
+          fetch("https://lockin-swart.vercel.app/api/site-score", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ url: pageContent.url, score, title: pageContent.title }),
+          }).catch((err) => console.error("[lockin] Failed to cache site score:", err))
+        }
+
+        sendResponse({ ok: true, score, cached: false })
+      } catch (err) {
+        sendResponse({ ok: false, error: "Rating failed: " + (err.message || String(err)) })
+      }
+    })()
+
+    return true
+  }
+
   return undefined
 })

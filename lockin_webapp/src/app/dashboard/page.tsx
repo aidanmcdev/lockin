@@ -15,6 +15,7 @@ interface DashboardData {
     totalFocusMinutes: number;
     currentStreak: number;
     totalPhonePickups: number;
+    avgProductivity?: number | null;
   };
   sessions: Array<{
     _id: string;
@@ -23,6 +24,7 @@ interface DashboardData {
     duration: number;
     activityMode?: string;
     events?: Array<{ type: string }>;
+    siteScores?: Array<{ url: string; score: number; visitedAt: number }>;
   }>;
 }
 

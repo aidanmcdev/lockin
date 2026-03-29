@@ -51,6 +51,7 @@ import {
   getLeagues,
   getLeagueLeaderboard,
   type SessionEvent,
+  type SiteScoreEntry,
 } from "@/lib/api"
 import { useIframeResizeToParent } from "@/lib/iframeParentSize"
 
@@ -211,6 +212,12 @@ export function FocusWidget({
   const distractedSecondsRef = useRef(0)
   const sessionStartedAtRef = useRef<number | null>(null)
 
+  // ── Site productivity scoring ──
+  const [currentSiteScore, setCurrentSiteScore] = useState<number | null>(null)
+  const [siteScoreLoading, setSiteScoreLoading] = useState(false)
+  const siteScoresRef = useRef<SiteScoreEntry[]>([])
+  const lastScoredUrlRef = useRef<string | null>(null)
+
   // ── Live leaderboard data from leagues API ──
   const [liveLeaderboard, setLiveLeaderboard] = useState<LeaderboardEntry[] | null>(null)
   const [liveUserRank, setLiveUserRank] = useState<number | undefined>(undefined)
@@ -354,6 +361,67 @@ export function FocusWidget({
     }, STEADY_DISTRACTED_NUDGE_MS)
     return () => window.clearInterval(id)
   }, [focusState])
+
+  /** Poll for URL changes during active session and request productivity scoring. */
+  useEffect(() => {
+    if (focusState === "getting_started" || !token) return
+
+    let cancelled = false
+
+    const rateCurrentPage = async () => {
+      try {
+        // Get the active tab's URL and ID
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+        const tab = tabs[0]
+        if (!tab?.id || !tab.url || cancelled) return
+
+        // Skip chrome:// and extension pages
+        if (tab.url.startsWith("chrome") || tab.url.startsWith("about:")) return
+
+        // Don't re-score the same URL
+        if (tab.url === lastScoredUrlRef.current) return
+        lastScoredUrlRef.current = tab.url
+
+        setSiteScoreLoading(true)
+        const res = await chrome.runtime.sendMessage({
+          type: "LOCKIN_RATE_WEBSITE",
+          tabId: tab.id,
+          url: tab.url,
+          token,
+          geminiApiKey: import.meta.env.VITE_GEMINI_API_KEY,
+        })
+
+        if (cancelled) return
+
+        if (res?.ok && typeof res.score === "number") {
+          setCurrentSiteScore(res.score)
+          siteScoresRef.current.push({
+            url: tab.url,
+            score: res.score,
+            visitedAt: sessionElapsedSeconds,
+          })
+        } else {
+          console.warn("[lockin] Site score failed:", res?.error)
+        }
+      } catch (err) {
+        console.error("[lockin] Site scoring error:", err)
+      } finally {
+        if (!cancelled) setSiteScoreLoading(false)
+      }
+    }
+
+    // Score immediately on entering session
+    rateCurrentPage()
+
+    // Poll every 5 seconds for URL changes
+    const interval = window.setInterval(rateCurrentPage, 5000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusState, token])
 
   /** Face / gaze pipeline calls `window.setFocusState(true|false)` each frame — map into widget states. */
   useEffect(() => {
@@ -813,6 +881,7 @@ export function FocusWidget({
         focusedSeconds: focused,
         distractedSeconds: distracted,
         events,
+        siteScores: [...siteScoresRef.current],
       }).catch((err) => console.error("[lockin] Failed to save session:", err))
     }
 
@@ -821,6 +890,9 @@ export function FocusWidget({
     focusedSecondsRef.current = 0
     distractedSecondsRef.current = 0
     sessionStartedAtRef.current = null
+    siteScoresRef.current = []
+    lastScoredUrlRef.current = null
+    setCurrentSiteScore(null)
 
     // Ensure future tabs (and refresh) don't rehydrate into an in-progress session.
     // Reset persisted state (instead of clearing) so preferences stay in sync across tabs.
@@ -1219,6 +1291,30 @@ export function FocusWidget({
                       />
                     </div>
                   </div>
+
+                  {/* Site productivity score */}
+                  {!isGettingStarted && (
+                    <div className="flex items-center justify-between rounded-md bg-muted/50 px-2.5 py-1.5">
+                      <span className="text-xs text-muted-foreground">
+                        Site productivity
+                      </span>
+                      <span
+                        className={cn(
+                          "text-xs font-semibold",
+                          currentSiteScore === null && "text-muted-foreground",
+                          currentSiteScore !== null && currentSiteScore >= 7 && "text-emerald-500",
+                          currentSiteScore !== null && currentSiteScore >= 4 && currentSiteScore < 7 && "text-yellow-500",
+                          currentSiteScore !== null && currentSiteScore < 4 && "text-red-500",
+                        )}
+                      >
+                        {siteScoreLoading
+                          ? "Scoring…"
+                          : currentSiteScore !== null
+                            ? `${currentSiteScore}/10`
+                            : "—"}
+                      </span>
+                    </div>
+                  )}
 
                   <ActivityModeRow
                     value={activityMode}

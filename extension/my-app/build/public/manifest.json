@@ -7,12 +7,23 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https://lockin-swart.vercel.app http://localhost:3000 http://3.237.198.19:5000 ws://3.237.198.19:5000 https://distal-nisha-trigonometrically.ngrok-free.dev wss://distal-nisha-trigonometrically.ngrok-free.dev"
   },
   "icons": {
+<<<<<<< HEAD
     "16": "./focusUp.png",
     "48": "./focusUp.png",
     "128": "./focusUp.png"
+=======
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+>>>>>>> a4e517cb7a52c218ae21be0f145966f29dee022c
   },
   "action": {
-    "default_title": "Lock-In — open panel"
+    "default_title": "Lock-In — open panel",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "background": {
     "service_worker": "background.js"

@@ -26,6 +26,12 @@ export interface SessionEvent {
   value?: number // 0-100 attentiveness score at this point in time
 }
 
+export interface SiteScoreEntry {
+  url: string
+  score: number
+  visitedAt: number
+}
+
 export interface CreateSessionPayload {
   date?: string
   attentionScore: number
@@ -34,6 +40,7 @@ export interface CreateSessionPayload {
   focusedSeconds: number
   distractedSeconds: number
   events: SessionEvent[]
+  siteScores?: SiteScoreEntry[]
 }
 
 export function createSession(token: string, payload: CreateSessionPayload) {

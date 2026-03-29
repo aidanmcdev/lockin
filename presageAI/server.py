@@ -112,9 +112,90 @@ def run_extract_vitals(video_path: str, api_key: str, timeout: int = 600) -> dic
         raise RuntimeError("SmartSpectra produced no output")
 
     try:
-        return json.loads(stdout)
+        raw = json.loads(stdout)
     except json.JSONDecodeError:
         raise RuntimeError(f"SmartSpectra output not valid JSON: {stdout[:500]}")
+
+    return extract_vitals_summary(raw)
+
+
+def extract_vitals_summary(raw: dict) -> dict:
+    """Parse SDK output and extract pulse rate, breathing rate, HRV, and stress."""
+    if raw.get("status") != "complete":
+        return raw
+
+    # Use the latest snapshot which has the most accumulated data
+    latest = raw.get("latest", {})
+
+    vitals = {
+        "pulse_rate_bpm": None,
+        "breathing_rate_bpm": None,
+        "hrv_ms": None,
+        "stress_index": None,
+    }
+
+    # Extract pulse rate
+    pulse = latest.get("pulse", {})
+    rate_list = pulse.get("rate", [])
+    if rate_list:
+        vitals["pulse_rate_bpm"] = rate_list[-1].get("value")
+    rate_conf = pulse.get("rateConfidence", [])
+    if rate_conf:
+        vitals["pulse_rate_confidence"] = rate_conf[-1].get("value")
+
+    # Extract HRV from pulse
+    hrv_list = pulse.get("hrv", pulse.get("heartRateVariability", []))
+    if isinstance(hrv_list, list) and hrv_list:
+        vitals["hrv_ms"] = hrv_list[-1].get("value")
+    elif isinstance(hrv_list, dict):
+        # might be nested
+        sdnn = hrv_list.get("sdnn", hrv_list.get("rmssd", []))
+        if isinstance(sdnn, list) and sdnn:
+            vitals["hrv_ms"] = sdnn[-1].get("value")
+
+    # Extract breathing rate
+    breathing = latest.get("breathing", {})
+    br_list = breathing.get("rate", [])
+    if br_list:
+        vitals["breathing_rate_bpm"] = br_list[-1].get("value")
+    br_conf = breathing.get("rateConfidence", [])
+    if br_conf:
+        vitals["breathing_rate_confidence"] = br_conf[-1].get("value")
+
+    # Extract stress index (may be under different keys)
+    stress = latest.get("stress", latest.get("stressIndex", {}))
+    if isinstance(stress, dict):
+        stress_val = stress.get("value", stress.get("index", []))
+        if isinstance(stress_val, list) and stress_val:
+            vitals["stress_index"] = stress_val[-1].get("value")
+        elif isinstance(stress_val, (int, float)):
+            vitals["stress_index"] = stress_val
+    elif isinstance(stress, list) and stress:
+        vitals["stress_index"] = stress[-1].get("value")
+
+    # Blood pressure if available
+    bp = latest.get("bloodPressure", {})
+    systolic = bp.get("systolic", [])
+    diastolic = bp.get("diastolic", [])
+    if systolic:
+        vitals["blood_pressure_systolic"] = systolic[-1].get("value")
+    if diastolic:
+        vitals["blood_pressure_diastolic"] = diastolic[-1].get("value")
+
+    # Metadata
+    meta = latest.get("metadata", {})
+
+    return {
+        "status": "complete",
+        "vitals": vitals,
+        "metadata": {
+            "api_version": meta.get("apiVersion"),
+            "video_id": meta.get("id"),
+            "frame_count": meta.get("frameCount"),
+        },
+        "snapshot_count": raw.get("snapshot_count", 1),
+        "raw_latest": latest,  # full data for debugging
+    }
 
 
 def process_video_async(job_id: str, video_path: str, api_key: str, cleanup: bool = True):

@@ -4,6 +4,8 @@
  * Processes a video file through the Presage SmartSpectra C++ SDK
  * and outputs vitals as JSON to stdout.
  *
+ * Extracts: pulse rate, breathing rate, HRV, stress index.
+ *
  * Usage:
  *   ./extract_vitals --input_video_path=/path/to/video.mp4 --api_key=YOUR_KEY
  */
@@ -14,6 +16,8 @@
 #include <iostream>
 #include <sstream>
 #include <cstdlib>
+#include <vector>
+#include <mutex>
 
 #include <absl/status/status.h>
 #include <absl/flags/flag.h>
@@ -27,12 +31,16 @@
 
 namespace spectra = presage::smartspectra;
 namespace settings = presage::smartspectra::container::settings;
-namespace vs = presage::smartspectra::video_source;
 
 ABSL_FLAG(std::string, input_video_path, "", "Path to video file to process.");
 ABSL_FLAG(std::string, api_key, "", "Presage API key. Falls back to SMARTSPECTRA_API_KEY env var.");
-ABSL_FLAG(bool, save_metrics_to_disk, false, "Save metrics JSON to output directory.");
-ABSL_FLAG(std::string, output_directory, "/tmp/presage_out", "Directory for metrics output.");
+
+// Holds all metrics snapshots received during processing
+struct MetricsCollector {
+    std::mutex mtx;
+    std::vector<std::string> snapshots; // raw JSON from each callback
+    std::string latest_raw;             // last full protobuf JSON for debug
+};
 
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
@@ -46,58 +54,43 @@ int main(int argc, char** argv) {
 
     std::string video_path = absl::GetFlag(FLAGS_input_video_path);
     std::string api_key = absl::GetFlag(FLAGS_api_key);
-    std::string output_dir = absl::GetFlag(FLAGS_output_directory);
-    bool save_to_disk = absl::GetFlag(FLAGS_save_metrics_to_disk);
 
-    // Fall back to env var for API key
     if (api_key.empty()) {
         const char* env_key = std::getenv("SMARTSPECTRA_API_KEY");
-        if (env_key) {
-            api_key = env_key;
-        }
+        if (env_key) api_key = env_key;
     }
 
     if (video_path.empty()) {
         std::cerr << "{\"error\": \"--input_video_path is required\"}" << std::endl;
         return EXIT_FAILURE;
     }
-
     if (api_key.empty()) {
         std::cerr << "{\"error\": \"API key required via --api_key or SMARTSPECTRA_API_KEY env var\"}" << std::endl;
         return EXIT_FAILURE;
     }
-
     if (!std::filesystem::exists(video_path)) {
         std::cerr << "{\"error\": \"Video file not found: " << video_path << "\"}" << std::endl;
         return EXIT_FAILURE;
     }
 
-    // Build settings by setting fields individually
+    // Configure SDK
     settings::Settings<settings::OperationMode::Continuous, settings::IntegrationMode::Rest> s;
-
-    // Video source — use pre-recorded video file
     s.video_source.input_video_path = video_path;
-
-    // General settings
     s.headless = true;
     s.start_with_recording_on = true;
     s.interframe_delay_ms = 1;
     s.scale_input = true;
     s.binary_graph = true;
-    s.enable_edge_metrics = false;
+    s.enable_edge_metrics = true;  // enable for richer per-frame data
     s.verbosity_level = 1;
-
-    // Continuous mode settings
     s.continuous.preprocessed_data_buffer_duration_s = 0.2;
-
-    // REST integration
     s.integration.api_key = api_key;
 
     spectra::container::CpuContinuousRestForegroundContainer container(s);
 
-    // Collect the last metrics JSON we receive
-    std::string last_metrics_json;
+    MetricsCollector collector;
 
+    // Status callback
     auto status = container.SetOnStatusChange(
         [](presage::physiology::StatusValue sv) -> absl::Status {
             LOG(INFO) << "Status: " << presage::physiology::GetStatusDescription(sv.value());
@@ -105,48 +98,82 @@ int main(int argc, char** argv) {
         }
     );
 
+    // Core metrics callback — cloud-processed vitals (pulse, breathing, HRV, stress, BP)
     if (status.ok()) {
         status = container.SetOnCoreMetricsOutput(
-            [&last_metrics_json, &save_to_disk, &output_dir](
+            [&collector](
                 const presage::physiology::MetricsBuffer& metrics,
                 int64_t timestamp_ms
             ) {
+                std::lock_guard<std::mutex> lock(collector.mtx);
+
+                // Get full JSON dump of this metrics buffer
+                collector.latest_raw.clear();
                 google::protobuf::util::JsonPrintOptions options;
-                options.add_whitespace = true;
-                google::protobuf::util::MessageToJsonString(metrics, &last_metrics_json, options);
+                options.add_whitespace = false;
+                options.always_print_primitive_fields = true;
+                google::protobuf::util::MessageToJsonString(metrics, &collector.latest_raw, options);
 
-                LOG(INFO) << "Received metrics at timestamp " << timestamp_ms << "ms";
+                collector.snapshots.push_back(collector.latest_raw);
 
-                if (save_to_disk) {
-                    if (!std::filesystem::exists(output_dir)) {
-                        std::filesystem::create_directories(output_dir);
-                    }
-                    std::string path = output_dir + "/metrics_" + std::to_string(timestamp_ms) + ".json";
-                    std::ofstream f(path);
-                    f << last_metrics_json;
-                    f.close();
-                }
+                LOG(INFO) << "Core metrics received at t=" << timestamp_ms
+                          << "ms (snapshot #" << collector.snapshots.size() << ")";
 
                 return absl::OkStatus();
             }
         );
     }
 
+    // Edge metrics callback — per-frame computed data
+    if (status.ok()) {
+        status = container.SetOnEdgeMetricsOutput(
+            [](const presage::physiology::Metrics& metrics) {
+                // We just log these — core metrics have the refined vitals
+                return absl::OkStatus();
+            }
+        );
+    }
+
+    // Suppress video display
+    if (status.ok()) {
+        status = container.SetOnVideoOutput(
+            [](cv::Mat& frame, int64_t timestamp) {
+                return absl::OkStatus();
+            }
+        );
+    }
+
+    // Run pipeline
     if (status.ok()) { status = container.Initialize(); }
     if (status.ok()) { status = container.Run(); }
 
     if (!status.ok()) {
-        std::cerr << "{\"error\": \"" << status.message() << "\"}" << std::endl;
+        std::cerr << "{\"error\": \"SDK error: " << status.message() << "\"}" << std::endl;
         return EXIT_FAILURE;
     }
 
-    // Output final metrics JSON to stdout
-    if (last_metrics_json.empty()) {
-        std::cout << "{\"status\": \"no_data\", \"error\": \"No metrics received from video\"}" << std::endl;
+    // Build output JSON
+    std::lock_guard<std::mutex> lock(collector.mtx);
+
+    if (collector.snapshots.empty()) {
+        std::cout << "{\"status\": \"no_data\", \"error\": \"No metrics received. Video may be too short or no face detected.\"}" << std::endl;
         return 2;
     }
 
-    std::cout << "{\"status\": \"complete\", \"metrics\": " << last_metrics_json << "}" << std::endl;
+    // Output all snapshots so the server can pick the best one,
+    // plus the latest as the primary result
+    std::ostringstream out;
+    out << "{";
+    out << "\"status\": \"complete\",";
+    out << "\"snapshot_count\": " << collector.snapshots.size() << ",";
+    out << "\"latest\": " << collector.latest_raw << ",";
+    out << "\"all_snapshots\": [";
+    for (size_t i = 0; i < collector.snapshots.size(); i++) {
+        if (i > 0) out << ",";
+        out << collector.snapshots[i];
+    }
+    out << "]}";
 
+    std::cout << out.str() << std::endl;
     return EXIT_SUCCESS;
 }

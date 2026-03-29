@@ -17,7 +17,7 @@ import {
   type ActivityMode,
 } from "@/components/widget/ActivityModeRow"
 import { Leaderboard, type LeaderboardEntry } from "@/components/widget/Leaderboard"
-import { Activity, Maximize2, Mic, MicOff, Minimize2, Settings, X } from "lucide-react"
+import { Activity, LogOut, Maximize2, Mic, MicOff, Minimize2, Settings, X } from "lucide-react"
 import {
   getFocusDebugSnapshot,
   getFocusDetectionCanvas,
@@ -79,6 +79,11 @@ export interface FocusWidgetProps {
    */
   freshSession?: boolean
 
+  /** Authenticated user info. */
+  user?: { id: string; name: string; email: string }
+  /** Called when the user logs out. */
+  onLogout?: () => void
+
   // Styling
   className?: string
 }
@@ -133,6 +138,8 @@ export function FocusWidget({
   onSettings,
   enableCameraFocusDetection = true,
   freshSession = false,
+  user,
+  onLogout,
   className,
 }: FocusWidgetProps) {
   const initialHydrated = useMemo(
@@ -814,6 +821,25 @@ export function FocusWidget({
                   live={vitalsLiveForSettings}
                 />
               </div>
+
+              {onLogout && (
+                <div className="mt-6 border-t border-border/60 pt-4">
+                  {user && (
+                    <p className="mb-2 text-xs text-muted-foreground truncate">
+                      Signed in as {user.name}
+                    </p>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-8 text-xs gap-1.5"
+                    onClick={onLogout}
+                  >
+                    <LogOut className="size-3" />
+                    Log out
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         ) : (

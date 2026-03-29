@@ -8,6 +8,8 @@ let lookAwayStart = null;
 let lastSpoken = 0;
 let hasWarnedThisEpisode = false;
 
+const TTS_ENABLED = false; // set to true to enable voice reminders
+
 const DISTRACTION_SECONDS = 0.3;
 const SPEECH_COOLDOWN_SECONDS = 5.0;
 
@@ -41,6 +43,7 @@ function getRandomMessage() {
 async function speakFocusMessage(text, force = false) {
   const now = nowSeconds();
 
+  if (!TTS_ENABLED) return;
   if (!force && now - lastSpoken < SPEECH_COOLDOWN_SECONDS) {
     return;
   }
@@ -252,7 +255,6 @@ async function start() {
 
     let distracted = false;
     let statusText = "Focused";
-    let statusColor = "lime";
 
     if (result.detections && result.detections.length > 0) {
       // Use the largest detected face
@@ -268,14 +270,12 @@ async function start() {
       if (box) drawFaceBox(box);
 
       const analysis = analyzeDetection(detection);
-      distracted   = analysis.distracted;
-      statusText   = analysis.reason;
-      statusColor  = distracted ? "red" : "lime";
+      distracted = analysis.distracted;
+      statusText = analysis.reason;
 
     } else {
-      distracted  = true;
-      statusText  = "No Face Detected";
-      statusColor = "red";
+      distracted = true;
+      statusText = "No Face Detected";
     }
 
     await handleFocusState(distracted);

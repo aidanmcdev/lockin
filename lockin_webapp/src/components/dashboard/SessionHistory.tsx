@@ -6,6 +6,12 @@ interface SessionEvent {
   type: string;
 }
 
+interface SiteScoreEntry {
+  url: string;
+  score: number;
+  visitedAt: number;
+}
+
 interface SessionHistoryProps {
   sessions: Array<{
     _id: string;
@@ -15,6 +21,7 @@ interface SessionHistoryProps {
     duration: number;
     activityMode?: string;
     events?: SessionEvent[];
+    siteScores?: SiteScoreEntry[];
   }>;
 }
 
@@ -37,6 +44,10 @@ export default function SessionHistory({ sessions }: SessionHistoryProps) {
         {recent.map((session) => {
           const phonePickups = session.events?.filter((e) => e.type === "phone_detected").length || 0;
           const mode = modeIcons[session.activityMode || "video"];
+          const siteScores = session.siteScores || [];
+          const avgProd = siteScores.length > 0
+            ? siteScores.reduce((s, e) => s + e.score, 0) / siteScores.length
+            : null;
           const scoreColor =
             session.attentionScore >= 80
               ? "text-green-600 bg-green-50 ring-green-200"
@@ -69,6 +80,13 @@ export default function SessionHistory({ sessions }: SessionHistoryProps) {
                 </div>
                 <div className="flex items-center gap-3 mt-0.5">
                   <span className="text-xs text-foreground/50">{session.duration} min</span>
+                  {avgProd !== null && (
+                    <span className={`text-xs flex items-center gap-1 ${
+                      avgProd >= 7 ? "text-green-500" : avgProd >= 4 ? "text-yellow-500" : "text-red-500"
+                    }`}>
+                      📊 {avgProd.toFixed(1)}/10
+                    </span>
+                  )}
                   {phonePickups > 0 && (
                     <span className="text-xs text-orange-500 flex items-center gap-1">
                       📱 {phonePickups}

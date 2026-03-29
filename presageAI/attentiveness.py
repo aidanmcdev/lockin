@@ -61,6 +61,14 @@ def _get_label(score: int) -> str:
     return "very_distracted"
 
 
+def _scale_score(raw_score: float) -> int:
+    """Apply sigmoid scaling to push scores higher — raw scores tend to underestimate attentiveness."""
+    k = 0.18   # steeper curve
+    x0 = 45    # shift left so 55 is already "high"
+    scaled = 100.0 / (1.0 + math.exp(-k * (raw_score - x0)))
+    return round(_clamp(scaled))
+
+
 # ---------------------------------------------------------------------------
 # Sub-score functions
 # ---------------------------------------------------------------------------
@@ -331,7 +339,8 @@ def compute_attentiveness(all_snapshots: list, metadata: dict = None) -> dict:
         if result["score"] is not None:
             weighted_sum += result["score"] * effective_weight
 
-    final_score = round(_clamp(weighted_sum))
+    raw_score = round(_clamp(weighted_sum))
+    final_score = _scale_score(raw_score)
 
     # Determine data quality
     if factors_available >= 5:

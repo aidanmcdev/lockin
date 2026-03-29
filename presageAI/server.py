@@ -1,18 +1,21 @@
 """
 Presage API Server - Production mode.
 
-Accepts video snippets via HTTP, processes them through the SmartSpectra C++ SDK,
-and returns vitals data (heart rate, breathing rate, etc.).
+Accepts video snippets via HTTP or real-time frame streams via WebSocket,
+processes them through the SmartSpectra C++ SDK, and returns vitals data.
 
-The C++ SDK handles all preprocessing and Presage API communication internally.
-
-Endpoints:
+HTTP Endpoints:
     POST /api/process-video    - Send a video file (async, returns job_id)
     POST /api/process-sync     - Send a video file (blocks until results)
     POST /api/process-frames   - Send multiple frames as images (converted to video)
     GET  /api/status/<id>      - Check processing status / get results
     GET  /api/jobs             - List all jobs
     GET  /health               - Health check
+
+WebSocket Events (via socket.io):
+    start_stream               - Begin real-time frame streaming
+    frame                      - Send a JPEG frame
+    stop_stream                - End streaming, get final results
 """
 
 import base64
@@ -29,9 +32,11 @@ import cv2
 import numpy as np
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 
 from config import HOST, PORT, PRESAGE_API_KEY, SMARTSPECTRA_BIN
 from attentiveness import compute_attentiveness
+from stream_session import StreamSession
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s [Server] %(message)s",
@@ -41,6 +46,7 @@ logging.basicConfig(
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Path to the compiled C++ binary
 EXTRACT_VITALS_BIN = SMARTSPECTRA_BIN
@@ -48,6 +54,10 @@ EXTRACT_VITALS_BIN = SMARTSPECTRA_BIN
 # In-memory job store
 jobs = {}
 jobs_lock = threading.Lock()
+
+# Active streaming sessions (sid -> StreamSession)
+stream_sessions = {}
+stream_sessions_lock = threading.Lock()
 
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -534,6 +544,125 @@ def list_jobs():
     return jsonify(summary)
 
 
+# ============================================================================
+# WebSocket streaming endpoints
+# ============================================================================
+
+@socketio.on("connect")
+def ws_connect():
+    logging.info(f"WebSocket client connected: {request.sid}")
+
+
+@socketio.on("disconnect")
+def ws_disconnect():
+    sid = request.sid
+    logging.info(f"WebSocket client disconnected: {sid}")
+    with stream_sessions_lock:
+        session = stream_sessions.pop(sid, None)
+    if session:
+        session.cleanup()
+
+
+@socketio.on("start_stream")
+def ws_start_stream(data):
+    """Start a real-time streaming session."""
+    sid = request.sid
+    fps = float(data.get("fps", 5.0)) if data else 5.0
+    api_key = (data.get("api_key") if data else None) or PRESAGE_API_KEY
+
+    if not api_key:
+        emit("error", {"message": "No API key configured."})
+        return
+
+    if not os.path.exists(EXTRACT_VITALS_BIN):
+        emit("error", {"message": "SmartSpectra binary not found on server."})
+        return
+
+    # Cleanup any existing session for this client
+    with stream_sessions_lock:
+        old = stream_sessions.pop(sid, None)
+    if old:
+        old.cleanup()
+
+    session = StreamSession(sid=sid, api_key=api_key, fps=fps)
+
+    # Set up callbacks that emit back to this specific client
+    def on_vitals(payload):
+        socketio.emit("vitals_update", payload, to=sid)
+
+    def on_attentiveness(payload):
+        socketio.emit("attentiveness_update", payload, to=sid)
+
+    def on_error(message):
+        socketio.emit("error", {"message": message}, to=sid)
+
+    session.set_callbacks(
+        on_vitals=on_vitals,
+        on_attentiveness=on_attentiveness,
+        on_error=on_error,
+    )
+
+    with stream_sessions_lock:
+        stream_sessions[sid] = session
+
+    try:
+        session.start()
+        emit("stream_started", {"session_id": session.session_id})
+        logging.info(f"Stream started for {sid}, session {session.session_id}")
+    except Exception as e:
+        logging.error(f"Failed to start stream for {sid}: {e}")
+        emit("error", {"message": str(e)})
+        with stream_sessions_lock:
+            stream_sessions.pop(sid, None)
+        session.cleanup()
+
+
+@socketio.on("frame")
+def ws_frame(data):
+    """Receive a JPEG frame from the client."""
+    sid = request.sid
+    with stream_sessions_lock:
+        session = stream_sessions.get(sid)
+
+    if not session:
+        emit("error", {"message": "No active stream. Call start_stream first."})
+        return
+
+    # data can be base64 string or binary
+    if isinstance(data, dict):
+        frame_data = data.get("data", "")
+        if isinstance(frame_data, str):
+            frame_data = base64.b64decode(frame_data)
+    elif isinstance(data, bytes):
+        frame_data = data
+    elif isinstance(data, str):
+        frame_data = base64.b64decode(data)
+    else:
+        emit("error", {"message": "Invalid frame data format."})
+        return
+
+    session.write_frame(frame_data)
+
+
+@socketio.on("stop_stream")
+def ws_stop_stream():
+    """Stop the streaming session and get final results."""
+    sid = request.sid
+    with stream_sessions_lock:
+        session = stream_sessions.pop(sid, None)
+
+    if not session:
+        emit("error", {"message": "No active stream."})
+        return
+
+    session.stop()
+    final = session.get_final_results()
+    emit("stream_stopped", {"final_results": final})
+    logging.info(f"Stream stopped for {sid}: {final.get('snapshot_count', 0)} snapshots, "
+                 f"{final.get('frames_sent', 0)} frames")
+    session.cleanup()
+
+
 if __name__ == "__main__":
     if not PRESAGE_API_KEY:
         logging.warning("PRESAGE_API_KEY not set! Set it in .env or pass per-request.")
@@ -541,4 +670,4 @@ if __name__ == "__main__":
         logging.warning(f"SmartSpectra binary not found at {EXTRACT_VITALS_BIN}")
         logging.warning("Build it: cd smartspectra && mkdir build && cd build && cmake .. && make")
     logging.info(f"Starting Presage API server on {HOST}:{PORT}")
-    app.run(host=HOST, port=PORT, debug=False, threaded=True)
+    socketio.run(app, host=HOST, port=int(PORT), debug=False, allow_unsafe_werkzeug=True)

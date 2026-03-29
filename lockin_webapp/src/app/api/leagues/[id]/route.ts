@@ -89,7 +89,8 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
       },
       leaderboard,
     });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }
@@ -120,7 +121,8 @@ export async function DELETE(req: NextRequest, { params }: RouteContext) {
     await league.save();
 
     return NextResponse.json({ message: "Left league" });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

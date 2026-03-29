@@ -44,7 +44,8 @@ function mountPanel(opts = {}) {
     background: "transparent",
     overflow: "hidden",
     width: "320px",
-    height: "240px",
+    // Tall enough for auth (signup) before iframe SIZE message; panel resizes via postMessage.
+    height: "420px",
   })
 
   const framePath = fresh ? "content-frame.html?lockinFresh=1" : "content-frame.html"
@@ -90,6 +91,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     showOrRemountPanel()
     sendResponse({ ok: true })
   }
+
+  if (message?.type === "LOCKIN_GET_PAGE_CONTENT") {
+    const title = document.title || ""
+    const metaDesc =
+      document.querySelector('meta[name="description"]')?.getAttribute("content") || ""
+    const bodyText = (document.body?.innerText || "").slice(0, 2000)
+    const url = window.location.href
+
+    sendResponse({ ok: true, title, metaDesc, bodyText, url })
+  }
+
   return true
 })
 

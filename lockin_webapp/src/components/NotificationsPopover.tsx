@@ -29,6 +29,8 @@ export default function NotificationsPopover({ unread, onUnreadChange }: Notific
   const [open, setOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationData[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [actedOn, setActedOn] = useState<Set<string>>(new Set());
+  const [acting, setActing] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Close on outside click
@@ -67,6 +69,7 @@ export default function NotificationsPopover({ unread, onUnreadChange }: Notific
   }
 
   async function handleFriendAction(notif: NotificationData, status: "accepted" | "declined") {
+    setActing(notif._id);
     try {
       const friendsData = await fetchWithAuth("/friends");
       const pending = friendsData.pending?.find(
@@ -74,19 +77,30 @@ export default function NotificationsPopover({ unread, onUnreadChange }: Notific
       );
       if (pending) {
         await fetchWithAuth(`/friends/${pending._id}`, { method: "PATCH", body: { status } });
-        loadNotifications();
       }
-    } catch {}
+      setActedOn((prev) => new Set(prev).add(notif._id));
+      loadNotifications();
+    } catch (err) {
+      console.error("Friend action error:", err);
+    } finally {
+      setActing(null);
+    }
   }
 
   async function handleLeagueAction(notif: NotificationData, action: "accept" | "decline") {
+    setActing(notif._id);
     try {
       await fetchWithAuth(`/leagues/${notif.referenceId}/join`, {
         method: "PATCH",
         body: { action },
       });
+      setActedOn((prev) => new Set(prev).add(notif._id));
       loadNotifications();
-    } catch {}
+    } catch (err) {
+      console.error("League action error:", err);
+    } finally {
+      setActing(null);
+    }
   }
 
   return (
@@ -150,34 +164,38 @@ export default function NotificationsPopover({ unread, onUnreadChange }: Notific
                       {formatTimeAgo(notif.createdAt)}
                     </p>
 
-                    {notif.type === "friend_request" && (
+                    {notif.type === "friend_request" && !actedOn.has(notif._id) && (
                       <div className="flex gap-2 mt-2">
                         <button
                           onClick={() => handleFriendAction(notif, "accepted")}
-                          className="px-3 py-1 bg-green-500 text-white text-xs font-medium rounded-md hover:bg-green-600 transition-colors"
+                          disabled={acting === notif._id}
+                          className="px-3 py-1 bg-green-500 text-white text-xs font-medium rounded-md hover:bg-green-600 disabled:opacity-50 transition-colors"
                         >
-                          Accept
+                          {acting === notif._id ? "..." : "Accept"}
                         </button>
                         <button
                           onClick={() => handleFriendAction(notif, "declined")}
-                          className="px-3 py-1 text-xs text-foreground/50 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                          disabled={acting === notif._id}
+                          className="px-3 py-1 text-xs text-foreground/50 hover:text-red-500 hover:bg-red-50 rounded-md disabled:opacity-50 transition-colors"
                         >
                           Decline
                         </button>
                       </div>
                     )}
 
-                    {notif.type === "league_invite" && (
+                    {notif.type === "league_invite" && !actedOn.has(notif._id) && (
                       <div className="flex gap-2 mt-2">
                         <button
                           onClick={() => handleLeagueAction(notif, "accept")}
-                          className="px-3 py-1 bg-purple-500 text-white text-xs font-medium rounded-md hover:bg-purple-600 transition-colors"
+                          disabled={acting === notif._id}
+                          className="px-3 py-1 bg-purple-500 text-white text-xs font-medium rounded-md hover:bg-purple-600 disabled:opacity-50 transition-colors"
                         >
-                          Join
+                          {acting === notif._id ? "..." : "Join"}
                         </button>
                         <button
                           onClick={() => handleLeagueAction(notif, "decline")}
-                          className="px-3 py-1 text-xs text-foreground/50 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                          disabled={acting === notif._id}
+                          className="px-3 py-1 text-xs text-foreground/50 hover:text-red-500 hover:bg-red-50 rounded-md disabled:opacity-50 transition-colors"
                         >
                           Decline
                         </button>

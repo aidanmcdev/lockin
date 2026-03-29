@@ -1,10 +1,17 @@
 import mongoose from "mongoose";
 
 export interface ISessionEvent {
-  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end";
+  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end" | "attentiveness";
   timestamp: number;
   duration?: number;
   details?: string;
+  value?: number; // 0-100 attentiveness score at this point
+}
+
+export interface ISiteScoreEntry {
+  url: string;
+  score: number;
+  visitedAt: number;
 }
 
 export interface ISession {
@@ -18,18 +25,20 @@ export interface ISession {
   focusedSeconds: number;
   distractedSeconds: number;
   events: ISessionEvent[];
+  siteScores: ISiteScoreEntry[];
 }
 
 const eventSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ["phone_detected", "distraction", "refocus", "session_start", "session_end"],
+      enum: ["phone_detected", "distraction", "refocus", "session_start", "session_end", "attentiveness"],
       required: true,
     },
     timestamp: { type: Number, required: true },
     duration: { type: Number },
     details: { type: String },
+    value: { type: Number },
   },
   { _id: false }
 );
@@ -44,6 +53,16 @@ const sessionSchema = new mongoose.Schema<ISession>({
   focusedSeconds: { type: Number, default: 0 },
   distractedSeconds: { type: Number, default: 0 },
   events: { type: [eventSchema], default: [] },
+  siteScores: {
+    type: [
+      {
+        url: { type: String, required: true },
+        score: { type: Number, required: true, min: 0, max: 10 },
+        visitedAt: { type: Number, required: true },
+      },
+    ],
+    default: [],
+  },
 });
 
 sessionSchema.index({ userId: 1, date: -1 });

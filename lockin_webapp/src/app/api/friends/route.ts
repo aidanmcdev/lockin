@@ -28,7 +28,8 @@ export async function GET(req: NextRequest) {
     }).populate("recipient", "name email");
 
     return NextResponse.json({ friends, pending, sent });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }
@@ -90,7 +91,8 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ message: "Friend request sent" }, { status: 201 });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

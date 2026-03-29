@@ -33,6 +33,7 @@ import {
 import {
   PresageStreamClient,
   startPresageFrameStream,
+  type RateLimitSchedule,
   type VitalsUpdatePayload,
   type AttentivenessUpdatePayload,
 } from "@/lib/presageStream"
@@ -92,7 +93,27 @@ const defaultLeaderboardEntries: LeaderboardEntry[] = [
   { id: "5", name: "Taylor Smith", focusTime: 165, rank: 5, previousRank: 4, avatarUrl: "" },
 ]
 
+/** Legacy segment length label for timers; live stream uses JPEG interval + socket push cadence. */
 const VITALS_SEGMENT_MS = 60_000
+/** Frames per second sent to Presage over socket.io (matches `PresageStreamClient.start`). */
+const VITALS_STREAM_FPS = 5
+/** One “video” burst to the API — then {@link PRESAGE_API_COOLDOWN_MS} gap (credit control). */
+const PRESAGE_BURST_WINDOW_MS = 30_000
+/** Pause frame uploads after each burst so Presage credits are not consumed continuously. */
+const PRESAGE_API_COOLDOWN_MS = 5 * 60_000
+
+type StreamTransportState = {
+  sessionId: string | null
+  framePhase: "waiting_video" | "sampling"
+  framesSent: number
+  lastFrameSentAt: number | null
+  lastVitalsAt: number | null
+  lastAttentivenessAt: number | null
+  /** Latest of vitals or attentiveness push (for “last payload in”). */
+  lastServerPayloadAt: number | null
+  /** Set after first frame when burst/cooldown throttling is enabled. */
+  rateLimit: RateLimitSchedule | null
+}
 
 type VitalsSyncPhaseModel =
   | "idle"
@@ -185,6 +206,8 @@ export function FocusWidget({
     segmentUploadFps: number
     segmentMimeType: string
     segmentFilename: string
+    /** Latest attentiveness sub-scores from socket (replaced on each push). */
+    attentivenessSubRows?: { label: string; value: string }[]
   }
 
   const [vitalsSyncPhase, setVitalsSyncPhase] =
@@ -205,6 +228,8 @@ export function FocusWidget({
     [],
   )
   const [vitalsLiveTick, setVitalsLiveTick] = useState(0)
+  const [streamTransport, setStreamTransport] =
+    useState<StreamTransportState | null>(null)
   // vitalsUploadChainRef removed — streaming mode doesn't need upload chaining
 
   const safeGraceTotal = Math.max(1, graceTotal)
@@ -355,6 +380,7 @@ export function FocusWidget({
       setVitalsRecordingStartedAt(null)
       setVitalsSegmentStartedAt(null)
       setVitalsUploadLog([])
+      setStreamTransport(null)
       return
     }
 
@@ -364,18 +390,31 @@ export function FocusWidget({
     setVitalsRecordingStartedAt(null)
     setVitalsSegmentStartedAt(null)
     setVitalsUploadLog([])
+    setStreamTransport({
+      sessionId: null,
+      framePhase: "waiting_video",
+      framesSent: 0,
+      lastFrameSentAt: null,
+      lastVitalsAt: null,
+      lastAttentivenessAt: null,
+      lastServerPayloadAt: null,
+      rateLimit: null,
+    })
 
     let streamSnapshotIndex = 0
 
     const client = new PresageStreamClient({
-      onStreamStarted: () => {
+      onStreamStarted: (sessionId) => {
         const t = Date.now()
         setVitalsWaitCameraStartedAt(null)
         setVitalsRecordingStartedAt(t)
         setVitalsSegmentStartedAt(t)
         setVitalsSyncPhase("recording")
         setVitalsSyncError(null)
-        console.log("[vitals-stream] stream started")
+        setStreamTransport((prev) =>
+          prev ? { ...prev, sessionId: sessionId ?? null } : prev,
+        )
+        console.log("[vitals-stream] stream started", sessionId)
       },
       onVitalsUpdate: (payload: VitalsUpdatePayload) => {
         streamSnapshotIndex++
@@ -385,38 +424,61 @@ export function FocusWidget({
             label: k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
             value: typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : String(v ?? "—"),
           }))
-        setVitalsSyncSnapshot({
-          attentiveness: null,
+        const ts = payload.timestamp_ms ?? Date.now()
+        setVitalsSyncSnapshot((prev) => ({
+          attentiveness: prev?.attentiveness ?? null,
+          attentivenessSubRows: prev?.attentivenessSubRows,
           vitalsRows,
           chunkIndex: streamSnapshotIndex,
           recordedAt: Date.now(),
-          segmentFps: 5,
-          segmentUploadFps: 5,
+          segmentFps: VITALS_STREAM_FPS,
+          segmentUploadFps: VITALS_STREAM_FPS,
           segmentMimeType: "stream",
           segmentFilename: "live-stream",
-        })
+        }))
+        setStreamTransport((prev) =>
+          prev
+            ? { ...prev, lastVitalsAt: ts, lastServerPayloadAt: ts }
+            : prev,
+        )
         setVitalsSyncError(null)
       },
       onAttentivenessUpdate: (payload: AttentivenessUpdatePayload) => {
         const att = payload.attentiveness
         const label = `Score ${att.score} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
-        const vitalsRows: { label: string; value: string }[] = []
+        const attentivenessSubRows: { label: string; value: string }[] = []
         if (att.sub_scores) {
           for (const [key, val] of Object.entries(att.sub_scores)) {
-            vitalsRows.push({
-              label: `Attentiveness · ${key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`,
-              value: typeof val.detail === "string" ? `${val.score} — ${val.detail}` : String(val.score),
+            attentivenessSubRows.push({
+              label: key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+              value:
+                typeof val.detail === "string"
+                  ? `${val.score} — ${val.detail}`
+                  : String(val.score),
             })
           }
         }
+        const now = Date.now()
         setVitalsSyncSnapshot((prev) => ({
-          ...(prev ?? { vitalsRows: [], chunkIndex: 0, recordedAt: Date.now(), segmentFps: 5, segmentUploadFps: 5, segmentMimeType: "stream", segmentFilename: "live-stream" }),
           attentiveness: label,
-          vitalsRows: [
-            ...(prev?.vitalsRows ?? []),
-            ...vitalsRows,
-          ],
+          attentivenessSubRows,
+          vitalsRows: prev?.vitalsRows ?? [],
+          chunkIndex: prev?.chunkIndex ?? streamSnapshotIndex,
+          recordedAt: now,
+          segmentFps: prev?.segmentFps ?? VITALS_STREAM_FPS,
+          segmentUploadFps: prev?.segmentUploadFps ?? VITALS_STREAM_FPS,
+          segmentMimeType: prev?.segmentMimeType ?? "stream",
+          segmentFilename: prev?.segmentFilename ?? "live-stream",
         }))
+        setStreamTransport((prev) =>
+          prev
+            ? {
+                ...prev,
+                lastAttentivenessAt: now,
+                lastServerPayloadAt: now,
+              }
+            : prev,
+        )
       },
       onError: (message: string) => {
         console.error("[vitals-stream] error:", message)
@@ -425,18 +487,42 @@ export function FocusWidget({
       onConnectionChange: (connected: boolean) => {
         if (!connected) {
           setVitalsSyncPhase("idle")
+          setStreamTransport(null)
         }
       },
     })
 
-    client.start(5)
+    client.start(VITALS_STREAM_FPS)
 
     const stopFrameCapture = startPresageFrameStream({
       getVideo: getFocusDetectionVideo,
       client,
-      fps: 5,
+      fps: VITALS_STREAM_FPS,
       jpegQuality: 0.7,
       maxFrameWidth: 640,
+      burstWindowMs: PRESAGE_BURST_WINDOW_MS,
+      cooldownBetweenBurstsMs: PRESAGE_API_COOLDOWN_MS,
+      onRateLimitSchedule: (schedule) => {
+        setStreamTransport((prev) =>
+          prev ? { ...prev, rateLimit: schedule } : prev,
+        )
+      },
+      onFrameStreamStatus: ({ phase }) => {
+        setStreamTransport((prev) =>
+          prev ? { ...prev, framePhase: phase } : prev,
+        )
+      },
+      onFrameSent: ({ index, sentAt }) => {
+        setStreamTransport((prev) =>
+          prev
+            ? {
+                ...prev,
+                framesSent: index,
+                lastFrameSentAt: sentAt,
+              }
+            : prev,
+        )
+      },
     })
 
     return () => {
@@ -449,6 +535,7 @@ export function FocusWidget({
       setVitalsRecordingStartedAt(null)
       setVitalsSegmentStartedAt(null)
       setVitalsUploadLog([])
+      setStreamTransport(null)
     }
   }, [enableCameraFocusDetection, pastGettingStarted])
 
@@ -638,6 +725,8 @@ export function FocusWidget({
           segmentTargetMs: VITALS_SEGMENT_MS,
           phase: vitalsSyncPhase,
           uploads: vitalsUploadLog,
+          transport: streamTransport,
+          streamFps: VITALS_STREAM_FPS,
         }
       : undefined
 
@@ -968,11 +1057,90 @@ function formatVitalsBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(2)} MB`
 }
 
-function vitalsPhaseLabel(phase: VitalsSyncPhaseModel) {
+function vitalsHeaderLabel(
+  phase: VitalsSyncPhaseModel,
+  transport: StreamTransportState | null | undefined,
+) {
   if (phase === "idle") return "Not started"
-  if (phase === "waiting_camera") return "Waiting for camera…"
-  if (phase === "uploading") return "Uploading segment…"
-  return "Recording (1 min)"
+  if (phase === "waiting_camera") return "WebSocket · starting stream…"
+  if (phase === "uploading") return "Uploading…"
+  if (phase === "recording") {
+    if (transport?.rateLimit?.phase === "cooldown") {
+      return "API cooldown · frames paused"
+    }
+    if (transport?.framePhase === "waiting_video") {
+      return "Live · preparing camera frames…"
+    }
+    if (transport?.framePhase === "sampling") {
+      return "Live · sending frames to server"
+    }
+    return "Live stream"
+  }
+  return "—"
+}
+
+function formatVitalsAgo(nowMs: number, ts: number | null | undefined): string {
+  if (ts == null || !Number.isFinite(ts)) return "—"
+  const sec = Math.max(0, Math.floor((nowMs - ts) / 1000))
+  if (sec < 1) return "just now"
+  if (sec < 60) return `${sec}s ago`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m}m ${s}s ago`
+}
+
+/** Count down to `endsAt` from `nowMs` as `m:ss` (ceil seconds). */
+function formatCountdownUntil(nowMs: number, endsAt: number | null): string {
+  if (endsAt == null || !Number.isFinite(endsAt)) return "—"
+  const sec = Math.max(0, Math.ceil((endsAt - nowMs) / 1000))
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m}:${String(s).padStart(2, "0")}`
+}
+
+function nextOutboundSummary(
+  nowMs: number,
+  phase: VitalsSyncPhaseModel,
+  transport: StreamTransportState,
+  streamFps: number,
+): { value: string; caption: string } {
+  if (phase === "waiting_camera") {
+    return { value: "—", caption: "After the stream handshakes" }
+  }
+  if (transport.framePhase === "waiting_video") {
+    return { value: "—", caption: "Waiting for camera before sending frames" }
+  }
+  const rl = transport.rateLimit
+  if (!rl) {
+    const ms = Math.round(1000 / streamFps)
+    return { value: `~${ms} ms`, caption: "Interval between frame payloads" }
+  }
+  if (rl.phase === "cooldown") {
+    return {
+      value: formatCountdownUntil(nowMs, rl.cooldownEndsAt),
+      caption: "Countdown until frames upload again",
+    }
+  }
+  return {
+    value: formatCountdownUntil(nowMs, rl.burstEndsAt),
+    caption: "Time left in this send burst",
+  }
+}
+
+function lastServerPayloadSummary(
+  nowMs: number,
+  at: number | null,
+): { value: string; caption: string } {
+  if (at == null || !Number.isFinite(at)) {
+    return {
+      value: "—",
+      caption: "Waiting for vitals or attentiveness from server",
+    }
+  }
+  return {
+    value: formatVitalsAgo(nowMs, at),
+    caption: "Since last socket payload (vitals or attentiveness)",
+  }
 }
 
 function VitalsSyncPanel({
@@ -992,6 +1160,7 @@ function VitalsSyncPanel({
         segmentUploadFps: number
         segmentMimeType: string
         segmentFilename: string
+        attentivenessSubRows?: { label: string; value: string }[]
       })
     | null
   /** Camera pipeline off — only the settings placeholder copy. */
@@ -1004,8 +1173,27 @@ function VitalsSyncPanel({
     segmentTargetMs: number
     phase: VitalsSyncPhaseModel
     uploads: VitalsUploadLogEntry[]
+    transport: StreamTransportState | null
+    streamFps: number
   }
 }) {
+  const payloadTimers =
+    live?.transport != null
+      ? {
+          transport: live.transport,
+          outbound: nextOutboundSummary(
+            live.nowMs,
+            live.phase,
+            live.transport,
+            live.streamFps,
+          ),
+          inbound: lastServerPayloadSummary(
+            live.nowMs,
+            live.transport.lastServerPayloadAt,
+          ),
+        }
+      : null
+
   if (cameraDisabled) {
     return (
       <div
@@ -1024,8 +1212,8 @@ function VitalsSyncPanel({
           </span>
         </div>
         <p className="text-[10px] leading-snug text-muted-foreground">
-          Turn on camera focus detection to record 1-minute segments and upload
-          them to the vitals endpoint.
+          Turn on camera focus detection to stream JPEG frames to the vitals
+          server over WebSocket.
         </p>
       </div>
     )
@@ -1048,8 +1236,8 @@ function VitalsSyncPanel({
           aria-hidden
         />
         <span className="text-xs font-medium text-foreground">Vitals sync</span>
-        <span className="ml-auto truncate text-[10px] text-muted-foreground">
-          {vitalsPhaseLabel(phase)}
+        <span className="ml-auto max-w-[14rem] truncate text-right text-[10px] text-muted-foreground">
+          {vitalsHeaderLabel(phase, live?.transport)}
         </span>
       </div>
 
@@ -1061,11 +1249,66 @@ function VitalsSyncPanel({
           <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             Live status
           </p>
+          {payloadTimers ? (
+            <div
+              className="space-y-3 rounded-md border border-violet-200/70 bg-violet-500/[0.06] px-2.5 py-2.5 dark:border-violet-500/25 dark:bg-violet-500/10"
+              role="status"
+              aria-live="polite"
+            >
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">
+                Payload timers
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="space-y-0.5">
+                  <p className="text-[10px] font-medium text-muted-foreground">
+                    Next send (out)
+                  </p>
+                  <p className="font-mono text-base font-semibold tabular-nums leading-none text-foreground">
+                    {payloadTimers.outbound.value}
+                  </p>
+                  <p className="text-[9px] leading-snug text-muted-foreground">
+                    {payloadTimers.outbound.caption}
+                  </p>
+                </div>
+                <div className="space-y-0.5">
+                  <p className="text-[10px] font-medium text-muted-foreground">
+                    Last received (in)
+                  </p>
+                  <p className="font-mono text-base font-semibold tabular-nums leading-none text-foreground">
+                    {payloadTimers.inbound.value}
+                  </p>
+                  <p className="text-[9px] leading-snug text-muted-foreground">
+                    {payloadTimers.inbound.caption}
+                  </p>
+                </div>
+              </div>
+              {payloadTimers.transport.lastVitalsAt != null ||
+              payloadTimers.transport.lastAttentivenessAt != null ? (
+                <p className="border-t border-violet-200/50 pt-2 text-[9px] leading-snug text-muted-foreground dark:border-violet-500/20">
+                  Vitals{" "}
+                  <span className="font-mono text-foreground/90">
+                    {formatVitalsAgo(
+                      live.nowMs,
+                      payloadTimers.transport.lastVitalsAt,
+                    )}
+                  </span>
+                  {" · "}
+                  Attentiveness{" "}
+                  <span className="font-mono text-foreground/90">
+                    {formatVitalsAgo(
+                      live.nowMs,
+                      payloadTimers.transport.lastAttentivenessAt,
+                    )}
+                  </span>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <dl className="space-y-1.5 font-mono text-[10px] leading-snug">
             {live.waitCameraStartedAt != null &&
             live.phase === "waiting_camera" ? (
               <div className="flex justify-between gap-2">
-                <dt className="text-muted-foreground">Waiting for camera</dt>
+                <dt className="text-muted-foreground">Stream starting</dt>
                 <dd className="shrink-0 tabular-nums text-foreground">
                   {formatVitalsDurationMs(
                     live.nowMs - live.waitCameraStartedAt,
@@ -1075,7 +1318,7 @@ function VitalsSyncPanel({
             ) : null}
             {live.recordingStartedAt != null ? (
               <div className="flex justify-between gap-2">
-                <dt className="text-muted-foreground">Total recording</dt>
+                <dt className="text-muted-foreground">Stream duration</dt>
                 <dd className="shrink-0 tabular-nums text-foreground">
                   {formatVitalsDurationMs(
                     live.nowMs - live.recordingStartedAt,
@@ -1083,8 +1326,41 @@ function VitalsSyncPanel({
                 </dd>
               </div>
             ) : null}
-            {live.segmentStartedAt != null &&
-            live.recordingStartedAt != null ? (
+            {live.transport ? (
+              <>
+                {live.transport.sessionId ? (
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">Session</dt>
+                    <dd
+                      className="min-w-0 max-w-[11rem] truncate text-right text-foreground"
+                      title={live.transport.sessionId}
+                    >
+                      {live.transport.sessionId.length > 14
+                        ? `${live.transport.sessionId.slice(0, 10)}…`
+                        : live.transport.sessionId}
+                    </dd>
+                  </div>
+                ) : null}
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">Frame send</dt>
+                  <dd className="text-right text-foreground">
+                    {live.transport.framePhase === "waiting_video"
+                      ? "Preparing JPEGs (waiting for video)…"
+                      : `Every ${Math.round(1000 / live.streamFps)} ms · ${live.streamFps} fps`}
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">Frames sent</dt>
+                  <dd className="text-right tabular-nums text-foreground">
+                    {live.transport.framesSent}
+                    {live.transport.lastFrameSentAt != null
+                      ? ` · last ${formatVitalsAgo(live.nowMs, live.transport.lastFrameSentAt)}`
+                      : ""}
+                  </dd>
+                </div>
+              </>
+            ) : live.segmentStartedAt != null &&
+              live.recordingStartedAt != null ? (
               <div className="space-y-1">
                 <div className="flex justify-between gap-2">
                   <dt className="text-muted-foreground">Current segment</dt>
@@ -1120,7 +1396,9 @@ function VitalsSyncPanel({
                     ? live.uploads[0].ok
                       ? `Last send OK (segment ${live.uploads[0].chunkIndex + 1})`
                       : `Last send failed (segment ${live.uploads[0].chunkIndex + 1})`
-                    : "No uploads yet"}
+                    : live.transport
+                      ? "WebSocket stream (no file upload)"
+                      : "No uploads yet"}
               </dd>
             </div>
           </dl>
@@ -1193,7 +1471,9 @@ function VitalsSyncPanel({
       {snapshot ? (
         <div className="space-y-2 rounded-md border border-border bg-background/80 px-2.5 py-2">
           <p className="text-[10px] font-medium text-muted-foreground">
-            Segment {snapshot.chunkIndex + 1}
+            {snapshot.segmentMimeType === "stream"
+              ? `Live update #${snapshot.chunkIndex}`
+              : `Segment ${snapshot.chunkIndex + 1}`}
             <span className="tabular-nums text-muted-foreground/80">
               {" "}
               ·{" "}
@@ -1235,6 +1515,25 @@ function VitalsSyncPanel({
                 {snapshot.attentiveness ?? "—"}
               </dd>
             </div>
+            {snapshot.attentivenessSubRows &&
+            snapshot.attentivenessSubRows.length > 0 ? (
+              <div className="space-y-1 border-t border-border pt-1.5">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Attentiveness detail
+                </div>
+                {snapshot.attentivenessSubRows.map((row) => (
+                  <div
+                    key={row.label}
+                    className="flex justify-between gap-2"
+                  >
+                    <dt className="text-muted-foreground">{row.label}</dt>
+                    <dd className="min-w-0 break-all text-right font-mono text-[10px] text-foreground">
+                      {row.value}
+                    </dd>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {snapshot.vitalsRows.length ? (
               <>
                 <div className="border-t border-border pt-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -1260,8 +1559,8 @@ function VitalsSyncPanel({
         !error && (
           <p className="text-[10px] leading-snug text-muted-foreground">
             {phase === "idle"
-              ? "Start a session from the main panel. After that, 1-minute clips upload automatically when each segment completes."
-              : "Each minute begins processing when a segment finishes recording. Keep your face in frame for best results."}
+              ? "Start a session from the main panel. Vitals sync runs over WebSocket while your session is active."
+              : "The server pushes vitals and attentiveness when it is ready. Keep your face in frame for best results."}
           </p>
         )
       )}

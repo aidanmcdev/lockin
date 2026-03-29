@@ -194,28 +194,120 @@ export class PresageStreamClient {
  * Captures JPEG frames from a video element and streams them via PresageStreamClient.
  * Returns a cleanup function to stop capturing.
  */
+export type FrameStreamStatus = {
+  phase: "waiting_video" | "sampling"
+  fps: number
+  intervalMs: number
+}
+
+/** Wall-clock targets for UI countdowns; only used when burst/cooldown throttling is enabled. */
+export type RateLimitSchedule = {
+  phase: "burst" | "cooldown"
+  burstWindowMs: number
+  cooldownMs: number
+  burstEndsAt: number | null
+  cooldownEndsAt: number | null
+}
+
 export function startPresageFrameStream(options: {
   getVideo: () => HTMLVideoElement | null
   client: PresageStreamClient
   fps?: number
   jpegQuality?: number
   maxFrameWidth?: number
+  /**
+   * Send frames for at most this long, then pause (requires `cooldownBetweenBurstsMs` > 0).
+   * Omit or `0` to stream continuously (no API throttle).
+   */
+  burstWindowMs?: number
+  /**
+   * After each burst, do not send frames for this many ms (saves API credits).
+   * Omit or `0` to disable throttling.
+   */
+  cooldownBetweenBurstsMs?: number
+  /** When burst/cooldown boundaries change (for UI). */
+  onRateLimitSchedule?: (schedule: RateLimitSchedule) => void
+  /** Fires when waiting for a live video frame vs when JPEG sampling has started. */
+  onFrameStreamStatus?: (status: FrameStreamStatus) => void
+  /** Fires after each frame is encoded and passed to the socket (same cadence as `intervalMs`). */
+  onFrameSent?: (info: { index: number; sentAt: number }) => void
 }): () => void {
   const fps = options.fps ?? 5
   const jpegQuality = options.jpegQuality ?? 0.7
   const maxFrameWidth = options.maxFrameWidth ?? 640
   const intervalMs = 1000 / fps
+  const burstWindowMs = options.burstWindowMs ?? 0
+  const cooldownBetweenBurstsMs = options.cooldownBetweenBurstsMs ?? 0
+  const rateLimitEnabled =
+    burstWindowMs > 0 && cooldownBetweenBurstsMs > 0
 
   let cancelled = false
   let waitTimerId = 0
   let sampleTimerId = 0
+  let frameIndex = 0
+  let reportedWaiting = false
+
+  let ratePhase: "burst" | "cooldown" = "burst"
+  let burstStartedAt = 0
+  let cooldownStartedAt = 0
+
+  const emitRateLimit = (phase: RateLimitSchedule["phase"]) => {
+    if (!rateLimitEnabled) return
+    if (phase === "burst") {
+      options.onRateLimitSchedule?.({
+        phase: "burst",
+        burstWindowMs,
+        cooldownMs: cooldownBetweenBurstsMs,
+        burstEndsAt: burstStartedAt + burstWindowMs,
+        cooldownEndsAt: null,
+      })
+    } else {
+      options.onRateLimitSchedule?.({
+        phase: "cooldown",
+        burstWindowMs,
+        cooldownMs: cooldownBetweenBurstsMs,
+        burstEndsAt: null,
+        cooldownEndsAt: cooldownStartedAt + cooldownBetweenBurstsMs,
+      })
+    }
+  }
 
   const canvas = document.createElement("canvas")
   const ctx = canvas.getContext("2d")
   if (!ctx) return () => {}
 
+  const emitStatus = (phase: FrameStreamStatus["phase"]) => {
+    options.onFrameStreamStatus?.({ phase, fps, intervalMs })
+  }
+
   const captureAndSend = () => {
     if (cancelled) return
+    const now = Date.now()
+
+    if (rateLimitEnabled) {
+      if (ratePhase === "cooldown") {
+        if (now - cooldownStartedAt < cooldownBetweenBurstsMs) {
+          return
+        }
+        ratePhase = "burst"
+        burstStartedAt = now
+        emitRateLimit("burst")
+      }
+
+      if (ratePhase === "burst") {
+        if (burstStartedAt === 0) {
+          burstStartedAt = now
+          emitRateLimit("burst")
+        }
+        if (now - burstStartedAt >= burstWindowMs) {
+          ratePhase = "cooldown"
+          cooldownStartedAt = now
+          emitRateLimit("cooldown")
+          return
+        }
+      }
+    }
+
     const video = options.getVideo()
     if (!video || video.videoWidth < 2) return
 
@@ -233,6 +325,8 @@ export function startPresageFrameStream(options: {
     const b64 = dataUrl.split(",")[1]
     if (b64) {
       options.client.sendFrame(b64)
+      frameIndex++
+      options.onFrameSent?.({ index: frameIndex, sentAt: Date.now() })
     }
   }
 
@@ -243,15 +337,25 @@ export function startPresageFrameStream(options: {
     const live = stream
       ?.getVideoTracks()
       ?.some((t) => t.readyState === "live")
-    if (!v || !stream || !live || v.videoWidth < 2) return
+    if (!v || !stream || !live || v.videoWidth < 2) {
+      if (!reportedWaiting) {
+        reportedWaiting = true
+        emitStatus("waiting_video")
+      }
+      return
+    }
 
     if (waitTimerId) {
       window.clearInterval(waitTimerId)
       waitTimerId = 0
     }
+    reportedWaiting = false
+    emitStatus("sampling")
     sampleTimerId = window.setInterval(captureAndSend, intervalMs)
   }
 
+  emitStatus("waiting_video")
+  reportedWaiting = true
   waitTimerId = window.setInterval(waitForVideo, 300)
 
   return () => {

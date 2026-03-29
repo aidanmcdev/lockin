@@ -44,7 +44,8 @@ function mountPanel(opts = {}) {
     background: "transparent",
     overflow: "hidden",
     width: "320px",
-    height: "240px",
+    // Tall enough for auth (signup) before iframe SIZE message; panel resizes via postMessage.
+    height: "420px",
   })
 
   const framePath = fresh ? "content-frame.html?lockinFresh=1" : "content-frame.html"

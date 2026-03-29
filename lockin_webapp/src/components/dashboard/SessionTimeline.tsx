@@ -49,13 +49,6 @@ function deduplicateEvents(events: TimelineEvent[]): TimelineEvent[] {
   return result;
 }
 
-function getAttentivenessColor(value: number): string {
-  if (value >= 80) return "text-green-600";
-  if (value >= 60) return "text-blue-600";
-  if (value >= 40) return "text-amber-600";
-  return "text-red-600";
-}
-
 function getAttentivenessBg(value: number): string {
   if (value >= 80) return "bg-green-500";
   if (value >= 60) return "bg-blue-500";
@@ -63,22 +56,52 @@ function getAttentivenessBg(value: number): string {
   return "bg-red-500";
 }
 
+function getAttentivenessLabel(value: number): string {
+  if (value >= 80) return "High";
+  if (value >= 60) return "Good";
+  if (value >= 40) return "Moderate";
+  return "Low";
+}
+
 export default function SessionTimeline({ events }: SessionTimelineProps) {
   const cleaned = deduplicateEvents(events);
 
-  // Separate attentiveness events for the chart, show others in timeline
   const attEvents = cleaned.filter((e) => e.type === "attentiveness" && e.value != null);
-  const timelineEvents = cleaned.filter((e) => e.type !== "attentiveness");
+  // Keep all events (including attentiveness) in the timeline
+  const timelineEvents = cleaned;
 
   return (
     <div className="space-y-6">
       {/* Attentiveness Chart */}
-      {attEvents.length > 0 && (
-        <div className="p-6 rounded-2xl bg-white border border-purple-100 shadow-sm">
-          <h2 className="text-lg font-semibold text-foreground mb-4">Attentiveness Over Time</h2>
+      <div className="p-6 rounded-2xl bg-white border border-purple-100 shadow-sm">
+        <h2 className="text-lg font-semibold text-foreground mb-4">Attentiveness Over Time</h2>
+        {attEvents.length > 3 ? (
           <AttentivenessChart events={attEvents} />
-        </div>
-      )}
+        ) : (
+          <div className="relative rounded-xl overflow-hidden">
+            {/* Blurred placeholder chart */}
+            <div className="h-[140px] bg-gradient-to-b from-purple-50 to-white flex items-center justify-center blur-sm select-none pointer-events-none">
+              <svg viewBox="0 0 200 60" className="w-full h-full opacity-30">
+                <polyline
+                  points="10,45 40,30 70,35 100,20 130,25 160,15 190,30"
+                  fill="none"
+                  stroke="#7c3aed"
+                  strokeWidth="2"
+                />
+              </svg>
+            </div>
+            {/* Overlay message */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <p className="text-sm font-medium text-foreground/60">Graph not available</p>
+              <p className="text-xs text-foreground/40 mt-1">
+                {attEvents.length === 0
+                  ? "No attentiveness data recorded for this session"
+                  : `Only ${attEvents.length} data point${attEvents.length === 1 ? "" : "s"} — need at least 4`}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Event Timeline */}
       <div className="p-6 rounded-2xl bg-white border border-purple-100 shadow-sm">
@@ -90,6 +113,7 @@ export default function SessionTimeline({ events }: SessionTimelineProps) {
           <div className="space-y-4">
             {timelineEvents.map((event, i) => {
               const style = eventStyles[event.type] || eventStyles.distraction;
+              const isAtt = event.type === "attentiveness" && event.value != null;
               return (
                 <div key={i} className="relative flex items-start gap-4 pl-1">
                   {/* Dot */}
@@ -106,9 +130,26 @@ export default function SessionTimeline({ events }: SessionTimelineProps) {
                       <span className="text-xs text-foreground/30 font-mono">
                         {formatTimestamp(event.timestamp)}
                       </span>
+                      {isAtt && (
+                        <span className={`text-xs font-bold ${
+                          event.value! >= 80 ? "text-green-600" :
+                          event.value! >= 60 ? "text-blue-600" :
+                          event.value! >= 40 ? "text-amber-600" : "text-red-600"
+                        }`}>
+                          {event.value}% — {getAttentivenessLabel(event.value!)}
+                        </span>
+                      )}
                     </div>
-                    {event.details && (
+                    {!isAtt && event.details && (
                       <p className="text-sm text-foreground/50 mt-0.5">{event.details}</p>
+                    )}
+                    {isAtt && (
+                      <div className="mt-1.5 h-2 w-32 rounded-full bg-gray-100 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${getAttentivenessBg(event.value!)}`}
+                          style={{ width: `${event.value}%` }}
+                        />
+                      </div>
                     )}
                     {event.duration && event.duration > 0 && (
                       <span className="inline-block mt-1 text-xs text-foreground/40 bg-foreground/5 px-2 py-0.5 rounded-full">
@@ -127,12 +168,9 @@ export default function SessionTimeline({ events }: SessionTimelineProps) {
 }
 
 function AttentivenessChart({ events }: { events: TimelineEvent[] }) {
-  if (events.length === 0) return null;
-
   const maxTime = events[events.length - 1].timestamp;
   const chartHeight = 120;
 
-  // Build SVG path
   const points = events.map((e) => ({
     x: maxTime > 0 ? (e.timestamp / maxTime) * 100 : 0,
     y: chartHeight - ((e.value || 0) / 100) * chartHeight,
@@ -144,7 +182,6 @@ function AttentivenessChart({ events }: { events: TimelineEvent[] }) {
     .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`)
     .join(" ");
 
-  // Area fill path
   const areaD = pathD + ` L ${points[points.length - 1].x} ${chartHeight} L ${points[0].x} ${chartHeight} Z`;
 
   return (
@@ -155,7 +192,6 @@ function AttentivenessChart({ events }: { events: TimelineEvent[] }) {
         preserveAspectRatio="none"
         style={{ height: `${chartHeight + 20}px` }}
       >
-        {/* Grid lines */}
         {[0, 25, 50, 75, 100].map((pct) => {
           const y = chartHeight - (pct / 100) * chartHeight;
           return (
@@ -166,13 +202,9 @@ function AttentivenessChart({ events }: { events: TimelineEvent[] }) {
           );
         })}
 
-        {/* Area fill */}
         <path d={areaD} fill="url(#attGradient)" opacity="0.3" />
-
-        {/* Line */}
         <path d={pathD} fill="none" stroke="#7c3aed" strokeWidth="0.8" strokeLinejoin="round" />
 
-        {/* Data points */}
         {points.map((p, i) => (
           <circle key={i} cx={p.x} cy={p.y} r="1" className={getAttentivenessBg(p.value).replace("bg-", "fill-")} />
         ))}
@@ -185,7 +217,6 @@ function AttentivenessChart({ events }: { events: TimelineEvent[] }) {
         </defs>
       </svg>
 
-      {/* Legend */}
       <div className="flex items-center justify-between mt-2 text-xs text-foreground/40">
         <span>{formatTimestamp(events[0].timestamp)}</span>
         <div className="flex items-center gap-3">

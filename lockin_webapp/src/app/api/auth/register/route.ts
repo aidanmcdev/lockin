@@ -97,7 +97,8 @@ export async function POST(req: NextRequest) {
       { token, user: { id: user._id, name: user.name, email: user.email } },
       { status: 201 }
     );
-  } catch {
+  } catch (error) {
+    console.error("Register error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

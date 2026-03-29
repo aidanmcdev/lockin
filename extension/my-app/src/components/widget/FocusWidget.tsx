@@ -27,6 +27,7 @@ import {
   STEADY_DISTRACTED_NUDGE_MS,
   type FocusDebugSnapshot,
 } from "@/focusDetection"
+import { formatAdjustedAttentivenessScore } from "@/lib/attentivenessScore"
 import {
   type ProcessSyncParsed,
 } from "@/lib/processSyncApi"
@@ -498,7 +499,7 @@ export function FocusWidget({
       },
       onAttentivenessUpdate: (payload: AttentivenessUpdatePayload) => {
         const att = payload.attentiveness
-        const label = `Score ${att.score} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
+        const label = `Score ${formatAdjustedAttentivenessScore(att.score)} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
         const attentivenessSubRows: { label: string; value: string }[] = []
         if (att.sub_scores) {
           for (const [key, val] of Object.entries(att.sub_scores)) {

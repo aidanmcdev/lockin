@@ -9,8 +9,20 @@ export function setToken(token: string) {
   localStorage.setItem("focusup_token", token);
 }
 
+export function getUserInfo(): { id: string; name: string; email: string } | null {
+  if (typeof window === "undefined") return null;
+  const raw = localStorage.getItem("focusup_user");
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+export function setUserInfo(user: { id: string; name: string; email: string }) {
+  localStorage.setItem("focusup_user", JSON.stringify(user));
+}
+
 export function removeToken() {
   localStorage.removeItem("focusup_token");
+  localStorage.removeItem("focusup_user");
 }
 
 export async function login(email: string, password: string) {
@@ -22,6 +34,7 @@ export async function login(email: string, password: string) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.message || "Login failed");
   setToken(data.token);
+  if (data.user) setUserInfo(data.user);
   return data;
 }
 
@@ -34,6 +47,7 @@ export async function signup(name: string, email: string, password: string) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.message || "Registration failed");
   setToken(data.token);
+  if (data.user) setUserInfo(data.user);
   return data;
 }
 
@@ -55,5 +69,9 @@ export async function fetchWithAuth(
     window.location.href = "/login";
     throw new Error("Unauthorized");
   }
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || "Something went wrong");
+  }
+  return data;
 }

@@ -25,7 +25,8 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json(session, { status: 201 });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

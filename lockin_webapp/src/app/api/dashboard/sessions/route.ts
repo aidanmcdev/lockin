@@ -13,7 +13,8 @@ export async function GET(req: NextRequest) {
     await connectDB();
     const sessions = await Session.find({ userId }).sort({ date: 1 }).limit(50);
     return NextResponse.json(sessions);
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

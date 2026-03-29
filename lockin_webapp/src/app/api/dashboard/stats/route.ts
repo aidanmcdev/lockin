@@ -60,7 +60,8 @@ export async function GET(req: NextRequest) {
       currentStreak,
       totalPhonePickups,
     });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

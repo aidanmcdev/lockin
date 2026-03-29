@@ -55,7 +55,8 @@ export async function PATCH(req: NextRequest, { params }: RouteContext) {
     });
 
     return NextResponse.json({ message: "Joined league" });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

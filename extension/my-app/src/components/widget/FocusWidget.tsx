@@ -46,6 +46,12 @@ import {
   WIDGET_STATE_STORAGE_KEY,
   writePersistedWidgetState,
 } from "@/lib/widgetStateStorage"
+import {
+  createSession,
+  getLeagues,
+  getLeagueLeaderboard,
+  type SessionEvent,
+} from "@/lib/api"
 
 export type WidgetPosition =
   | "bottom-right"
@@ -82,6 +88,8 @@ export interface FocusWidgetProps {
 
   /** Authenticated user info. */
   user?: { id: string; name: string; email: string }
+  /** JWT token for API calls. */
+  token?: string
   /** Called when the user logs out. */
   onLogout?: () => void
 
@@ -89,14 +97,7 @@ export interface FocusWidgetProps {
   className?: string
 }
 
-// Placeholder data for demonstration
-const defaultLeaderboardEntries: LeaderboardEntry[] = [
-  { id: "1", name: "Sarah Chen", focusTime: 245, rank: 1, previousRank: 2, avatarUrl: "" },
-  { id: "2", name: "Alex Kim", focusTime: 230, rank: 2, previousRank: 1, avatarUrl: "" },
-  { id: "3", name: "Jordan Lee", focusTime: 218, rank: 3, previousRank: 3, avatarUrl: "" },
-  { id: "current", name: "You", focusTime: 187, rank: 4, previousRank: 5, isCurrentUser: true, avatarUrl: "" },
-  { id: "5", name: "Taylor Smith", focusTime: 165, rank: 5, previousRank: 4, avatarUrl: "" },
-]
+const defaultLeaderboardEntries: LeaderboardEntry[] = []
 
 /** Legacy segment length label for timers; live stream uses JPEG interval + socket push cadence. */
 const VITALS_SEGMENT_MS = 60_000
@@ -152,14 +153,15 @@ export function FocusWidget({
   sessionGoal = 60,
   graceTotal = 10,
   leaderboardEntries = defaultLeaderboardEntries,
-  currentUserRank = 4,
-  totalParticipants = 12,
+  currentUserRank,
+  totalParticipants,
   position = "bottom-right",
   onClose,
   onSettings,
   enableCameraFocusDetection = true,
   freshSession = false,
   user,
+  token,
   onLogout,
   className,
 }: FocusWidgetProps) {
@@ -203,6 +205,18 @@ export function FocusWidget({
   const [focusDebugSnap, setFocusDebugSnap] = useState<FocusDebugSnapshot | null>(
     null,
   )
+
+  // ── Session event tracking for backend sync ──
+  const sessionEventsRef = useRef<SessionEvent[]>([])
+  const focusedSecondsRef = useRef(0)
+  const distractedSecondsRef = useRef(0)
+  const sessionStartedAtRef = useRef<number | null>(null)
+
+  // ── Live leaderboard data from leagues API ──
+  const [liveLeaderboard, setLiveLeaderboard] = useState<LeaderboardEntry[] | null>(null)
+  const [liveUserRank, setLiveUserRank] = useState<number | undefined>(undefined)
+  const [liveTotalParticipants, setLiveTotalParticipants] = useState<number | undefined>(undefined)
+  const [leaderboardRefreshing, setLeaderboardRefreshing] = useState(false)
 
   type VitalsSyncSnapshot = ProcessSyncParsed & {
     chunkIndex: number
@@ -287,6 +301,38 @@ export function FocusWidget({
     window.addEventListener("storage", onStorage)
     return () => window.removeEventListener("storage", onStorage)
   }, [])
+
+  /** Track focus-state transitions as session events for backend sync. */
+  useEffect(() => {
+    const prev = prevFocusStateRef.current
+    const ts = sessionElapsedSeconds
+    if (prev === undefined) { /* first render — skip */ }
+    else if (focusState === "distracted" && prev !== "distracted") {
+      sessionEventsRef.current.push({ type: "distraction", timestamp: ts, details: "User became distracted" })
+    } else if (focusState === "focused" && (prev === "distracted" || prev === "warning")) {
+      sessionEventsRef.current.push({ type: "refocus", timestamp: ts, details: "User refocused" })
+    } else if (focusState === "calibrating" && prev === "getting_started") {
+      sessionEventsRef.current.push({ type: "session_start", timestamp: ts, details: "Session started" })
+      sessionStartedAtRef.current = Date.now()
+      focusedSecondsRef.current = 0
+      distractedSecondsRef.current = 0
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusState])
+
+  /** Accumulate focused vs distracted seconds each tick. */
+  useEffect(() => {
+    if (focusState !== "focused" && focusState !== "warning" && focusState !== "distracted") return
+    const id = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return
+      if (focusState === "focused" || focusState === "warning") {
+        focusedSecondsRef.current += 1
+      } else if (focusState === "distracted") {
+        distractedSecondsRef.current += 1
+      }
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [focusState])
 
   /** First ElevenLabs line when entering `distracted` (after grace). */
   useEffect(() => {
@@ -674,6 +720,40 @@ export function FocusWidget({
   }, [settingsOpen, enableCameraFocusDetection])
 
 
+  /** Fetch league leaderboard — reusable for mount + manual refresh. */
+  const refreshLeaderboard = useCallback(async () => {
+    if (!token || !user) return
+    setLeaderboardRefreshing(true)
+    try {
+      const leagues = await getLeagues(token)
+      if (!leagues.length) return
+      const data = await getLeagueLeaderboard(token, leagues[0]._id)
+
+      const entries: LeaderboardEntry[] = data.leaderboard.map((m, i) => ({
+        id: m.userId,
+        name: m.name,
+        focusTime: Math.round(m.score),
+        rank: m.rank ?? i + 1,
+        isCurrentUser: m.userId === user.id,
+      }))
+
+      const myEntry = entries.find((e) => e.isCurrentUser)
+      setLiveLeaderboard(entries)
+      setLiveUserRank(myEntry?.rank)
+      setLiveTotalParticipants(data.league.memberCount ?? entries.length)
+    } catch (err) {
+      console.warn("[lockin] Could not fetch leaderboard:", err)
+    } finally {
+      setLeaderboardRefreshing(false)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, user?.id])
+
+  /** Fetch league leaderboard on mount when authenticated. */
+  useEffect(() => {
+    refreshLeaderboard()
+  }, [refreshLeaderboard])
+
   const handleClose = useCallback(() => {
     setIsVisible(false)
     setTimeout(() => {
@@ -682,9 +762,41 @@ export function FocusWidget({
   }, [onClose])
 
   const handleEndSession = useCallback(() => {
+    // Capture values before resetting
+    const elapsed = sessionElapsedSeconds
+    const focused = focusedSecondsRef.current
+    const distracted = distractedSecondsRef.current
+    const events = [...sessionEventsRef.current]
+    const mode = activityMode
+
+    // Add session_end event
+    events.push({ type: "session_end", timestamp: elapsed, details: "Session ended" })
+
+    // Send session to backend
+    if (token && elapsed > 0) {
+      const total = focused + distracted || 1
+      const attentionScore = Math.round((focused / total) * 100)
+      const durationMinutes = Math.round(elapsed / 60)
+
+      createSession(token, {
+        attentionScore,
+        duration: durationMinutes,
+        activityMode: mode,
+        focusedSeconds: focused,
+        distractedSeconds: distracted,
+        events,
+      }).catch((err) => console.error("[lockin] Failed to save session:", err))
+    }
+
+    // Reset tracking
+    sessionEventsRef.current = []
+    focusedSecondsRef.current = 0
+    distractedSecondsRef.current = 0
+    sessionStartedAtRef.current = null
+
     setSessionElapsedSeconds(0)
     handleClose()
-  }, [handleClose])
+  }, [handleClose, sessionElapsedSeconds, activityMode, token])
 
   const adjustSessionGoal = useCallback((deltaMinutes: number) => {
     setSessionGoalMinutes((m) =>
@@ -1035,11 +1147,15 @@ export function FocusWidget({
                   />
                 </div>
 
-                <Leaderboard
-                  entries={leaderboardEntries}
-                  currentUserRank={currentUserRank}
-                  totalParticipants={totalParticipants}
-                />
+                {(liveLeaderboard ?? leaderboardEntries).length > 0 && (
+                  <Leaderboard
+                    entries={liveLeaderboard ?? leaderboardEntries}
+                    currentUserRank={liveUserRank ?? currentUserRank}
+                    totalParticipants={liveTotalParticipants ?? totalParticipants}
+                    onRefresh={refreshLeaderboard}
+                    refreshing={leaderboardRefreshing}
+                  />
+                )}
               </>
             )}
           </CardContent>

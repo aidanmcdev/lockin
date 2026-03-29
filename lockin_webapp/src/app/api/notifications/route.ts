@@ -18,7 +18,8 @@ export async function GET(req: NextRequest) {
     const unreadCount = await Notification.countDocuments({ userId, read: false });
 
     return NextResponse.json({ notifications, unreadCount });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

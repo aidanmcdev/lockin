@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getToken, fetchWithAuth } from "@/lib/auth";
+import { getToken, fetchWithAuth, getUserInfo } from "@/lib/auth";
 import Navbar from "@/components/Navbar";
 
 interface UserRef {
@@ -86,15 +86,9 @@ export default function FriendsPage() {
     );
   }
 
-  // Figure out current userId from friend data to resolve "other" user
   function getOtherUser(f: FriendRecord): UserRef {
-    // In accepted friends, we need to show the other person
-    // The current user could be requester or recipient
-    if (data?.pending.some((p) => p._id === f._id)) return f.requester;
-    if (data?.sent.some((s) => s._id === f._id)) return f.recipient;
-    // For accepted friends, compare IDs - we show whichever isn't "us"
-    // Since we don't have userId on client, use a heuristic:
-    // if this record appears in 'friends' array, check both sides
+    const me = getUserInfo();
+    if (me && f.requester._id === me.id) return f.recipient;
     return f.requester;
   }
 

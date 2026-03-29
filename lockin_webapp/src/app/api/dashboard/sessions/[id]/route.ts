@@ -21,7 +21,8 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
     }
 
     return NextResponse.json(session);
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }
@@ -48,7 +49,8 @@ export async function PATCH(req: NextRequest, { params }: RouteContext) {
     }
 
     return NextResponse.json(session);
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }
@@ -69,7 +71,8 @@ export async function DELETE(req: NextRequest, { params }: RouteContext) {
     }
 
     return NextResponse.json({ message: "Session deleted" });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

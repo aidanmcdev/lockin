@@ -13,10 +13,14 @@ const freshSession =
 export default function App() {
   const [loading, setLoading] = useState(true)
   const [user, setUser] = useState<AuthUser | null>(null)
+  const [token, setToken] = useState<string | null>(null)
 
   useEffect(() => {
     getAuth().then((auth) => {
-      if (auth) setUser(auth.user)
+      if (auth) {
+        setUser(auth.user)
+        setToken(auth.token)
+      }
       setLoading(false)
     })
   }, [])
@@ -24,14 +28,18 @@ export default function App() {
   async function handleLogout() {
     await clearAuth()
     setUser(null)
+    setToken(null)
   }
 
   if (loading) return null
 
-  if (!user) {
+  if (!user || !token) {
     return (
       <AuthScreen
-        onLogin={(_token, u) => setUser(u)}
+        onLogin={(t, u) => {
+          setToken(t)
+          setUser(u)
+        }}
       />
     )
   }
@@ -41,6 +49,7 @@ export default function App() {
       position="top-right"
       freshSession={freshSession}
       user={user}
+      token={token}
       onLogout={handleLogout}
       onClose={
         isExtensionPanel

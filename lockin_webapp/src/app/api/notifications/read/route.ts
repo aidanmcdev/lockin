@@ -11,7 +11,8 @@ export async function PATCH(req: NextRequest) {
     await connectDB();
     await Notification.updateMany({ userId, read: false }, { read: true });
     return NextResponse.json({ message: "All notifications marked as read" });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

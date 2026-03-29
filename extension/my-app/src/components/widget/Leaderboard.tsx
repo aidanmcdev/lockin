@@ -9,7 +9,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
-import { ChevronDown, Trophy, TrendingUp, TrendingDown, Minus } from "lucide-react"
+import { ChevronDown, RefreshCw, Trophy, TrendingUp, TrendingDown, Minus } from "lucide-react"
 
 export interface LeaderboardEntry {
   id: string
@@ -25,6 +25,8 @@ interface LeaderboardProps {
   entries: LeaderboardEntry[]
   currentUserRank?: number
   totalParticipants?: number
+  onRefresh?: () => void
+  refreshing?: boolean
   className?: string
 }
 
@@ -70,6 +72,8 @@ export function Leaderboard({
   entries,
   currentUserRank,
   totalParticipants,
+  onRefresh,
+  refreshing,
   className,
 }: LeaderboardProps) {
   const [isExpanded, setIsExpanded] = useState(false)
@@ -95,12 +99,39 @@ export function Leaderboard({
               </span>
             )}
           </span>
-          <ChevronDown
-            className={cn(
-              "size-3 text-muted-foreground transition-transform duration-200",
-              isExpanded && "rotate-180"
+          <span className="flex items-center gap-1">
+            {onRefresh && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label="Refresh leaderboard"
+                className="inline-flex items-center justify-center size-5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRefresh()
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.stopPropagation()
+                    onRefresh()
+                  }
+                }}
+              >
+                <RefreshCw
+                  className={cn(
+                    "size-3",
+                    refreshing && "animate-spin",
+                  )}
+                />
+              </span>
             )}
-          />
+            <ChevronDown
+              className={cn(
+                "size-3 text-muted-foreground transition-transform duration-200",
+                isExpanded && "rotate-180"
+              )}
+            />
+          </span>
         </Button>
       </CollapsibleTrigger>
       

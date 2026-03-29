@@ -72,7 +72,8 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
     }
 
     return NextResponse.json({ message: "Invite sent" }, { status: 201 });
-  } catch {
+  } catch (error) {
+    console.error("API error:", error);
     return NextResponse.json({ message: "Server error" }, { status: 500 });
   }
 }

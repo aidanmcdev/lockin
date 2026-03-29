@@ -125,21 +125,37 @@ export function FocusStatus({
   return (
     <div className={cn("flex items-center justify-between", className)}>
       {/* Focus State Badge */}
-      <Badge
-        variant="outline"
-        className={cn(
-          "flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium transition-all duration-300",
-          config.bgClass,
-          config.colorClass,
-        )}
-      >
-        <Icon 
+      {isGettingStarted && onStartSessionFromSetup ? (
+        <button
+          type="button"
+          onClick={onStartSessionFromSetup}
+          title="Start session"
+          aria-label="Start session"
           className={cn(
-            "size-3.5 transition-transform duration-300",
-          )} 
-        />
-        <span>{config.label}</span>
-      </Badge>
+            badgeVariants({ variant: "outline" }),
+            "flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium transition-all duration-300",
+            config.bgClass,
+            config.colorClass,
+            "cursor-pointer hover:bg-violet-500/25 hover:text-violet-900 dark:hover:bg-violet-500/20 dark:hover:text-violet-100",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+          )}
+        >
+          <Icon className="size-3.5 transition-transform duration-300" />
+          <span>{config.label}</span>
+        </button>
+      ) : (
+        <Badge
+          variant="outline"
+          className={cn(
+            "flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium transition-all duration-300",
+            config.bgClass,
+            config.colorClass,
+          )}
+        >
+          <Icon className="size-3.5 transition-transform duration-300" />
+          <span>{config.label}</span>
+        </Badge>
+      )}
 
       {/* Session clock: blue in calibrating; yellow in warning; amber when distracted; muted when away. */}
       {(() => {
@@ -253,6 +269,9 @@ export function FocusStatus({
                   "group-hover:pointer-events-auto group-hover:opacity-100",
                   "cursor-pointer border-destructive/45 bg-destructive/10 px-2.5 py-1 text-xs font-semibold text-destructive shadow-sm",
                   "hover:bg-destructive/15 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                  // Dark theme contrast: make the destructive chip more visible on neutral-800 panel.
+                  // In dark mode we want hover to get *darker* (less red fill) instead of lighter.
+                  "dark:border-destructive/60 dark:bg-destructive/35 dark:hover:bg-destructive/25 dark:text-destructive-foreground dark:hover:border-destructive/70",
                 )}
               >
                 End session

@@ -15,6 +15,7 @@ export type PersistedWidgetStateV1 = {
   activityMode: ActivityMode
   minimized: boolean
   ttsEnabled: boolean
+  darkMode: boolean
   settingsOpen: boolean
 }
 
@@ -62,6 +63,7 @@ function parsePersisted(raw: string): Partial<PersistedWidgetStateV1> | null {
     }
     if (typeof o.minimized === "boolean") out.minimized = o.minimized
     if (typeof o.ttsEnabled === "boolean") out.ttsEnabled = o.ttsEnabled
+    if (typeof o.darkMode === "boolean") out.darkMode = o.darkMode
     if (typeof o.settingsOpen === "boolean") out.settingsOpen = o.settingsOpen
 
     return Object.keys(out).length ? out : null
@@ -113,6 +115,7 @@ export type HydratedWidgetState = {
   activityMode: ActivityMode
   minimized: boolean
   ttsEnabled: boolean
+  darkMode: boolean
   settingsOpen: boolean
 }
 
@@ -136,6 +139,7 @@ export function hydrateWidgetState(options: {
       activityMode: "lecture",
       minimized: false,
       ttsEnabled: true,
+      darkMode: true,
       settingsOpen: false,
     }
   }
@@ -149,6 +153,7 @@ export function hydrateWidgetState(options: {
   let activityMode: ActivityMode = "lecture"
   let minimized = false
   let ttsEnabled = true
+  let darkMode = true
   let settingsOpen = false
 
   if (p) {
@@ -159,6 +164,7 @@ export function hydrateWidgetState(options: {
     if (p.activityMode !== undefined) activityMode = p.activityMode
     if (p.minimized !== undefined) minimized = p.minimized
     if (p.ttsEnabled !== undefined) ttsEnabled = p.ttsEnabled
+    if (p.darkMode !== undefined) darkMode = p.darkMode
     if (p.settingsOpen !== undefined) settingsOpen = p.settingsOpen
   } else if (options.initialFocusState !== "getting_started") {
     const legacy = readLegacySessionElapsedOnly()
@@ -182,6 +188,7 @@ export function hydrateWidgetState(options: {
     activityMode,
     minimized,
     ttsEnabled,
+    darkMode,
     settingsOpen,
   }
 }

@@ -16,7 +16,7 @@ import {
   type ActivityMode,
 } from "@/components/widget/ActivityModeRow"
 import { Leaderboard, type LeaderboardEntry } from "@/components/widget/Leaderboard"
-import { Activity, LogOut, Maximize2, Mic, MicOff, Minimize2, Settings, X } from "lucide-react"
+import { Activity, LogOut, Maximize2, Minimize2, Moon, Settings, Sun, Volume2, VolumeX, X } from "lucide-react"
 import {
   getFocusDebugSnapshot,
   getFocusDetectionCanvas,
@@ -103,6 +103,9 @@ const defaultLeaderboardEntries: LeaderboardEntry[] = []
 
 /** Legacy segment length label for timers; live stream uses JPEG interval + socket push cadence. */
 const VITALS_SEGMENT_MS = 60_000
+/** Prevent rapid focused↔warning flapping from per-frame signals. */
+const FOCUS_SIGNAL_TO_WARNING_DELAY_MS = 700
+const FOCUS_SIGNAL_TO_FOCUSED_DELAY_MS = 250
 /** Frames per second sent to Presage over socket.io (matches `PresageStreamClient.start`). */
 const VITALS_STREAM_FPS = 5
 /** One “video” burst to the API — then {@link PRESAGE_API_COOLDOWN_MS} gap (credit control). */
@@ -195,6 +198,7 @@ export function FocusWidget({
   const [minimized, setMinimized] = useState(initialHydrated.minimized)
   const [settingsOpen, setSettingsOpen] = useState(initialHydrated.settingsOpen)
   const [ttsEnabled, setTtsEnabled] = useState(initialHydrated.ttsEnabled)
+  const [darkMode, setDarkMode] = useState(initialHydrated.darkMode)
   const rootRef = useRef<HTMLDivElement>(null)
   const settingsCanvasRef = useRef<HTMLCanvasElement>(null)
   const prevFocusStateRef = useRef<FocusState | undefined>(undefined)
@@ -268,6 +272,7 @@ export function FocusWidget({
       activityMode,
       minimized,
       ttsEnabled,
+      darkMode,
       settingsOpen,
     })
   }, [
@@ -278,6 +283,7 @@ export function FocusWidget({
     activityMode,
     minimized,
     ttsEnabled,
+    darkMode,
     settingsOpen,
   ])
 
@@ -298,6 +304,7 @@ export function FocusWidget({
       if (p.activityMode !== undefined) setActivityMode(p.activityMode)
       if (p.minimized !== undefined) setMinimized(p.minimized)
       if (p.ttsEnabled !== undefined) setTtsEnabled(p.ttsEnabled)
+      if (p.darkMode !== undefined) setDarkMode(p.darkMode)
       if (p.settingsOpen !== undefined) setSettingsOpen(p.settingsOpen)
     }
     window.addEventListener("storage", onStorage)
@@ -418,17 +425,52 @@ export function FocusWidget({
 
   /** Face / gaze pipeline calls `window.setFocusState(true|false)` each frame — map into widget states. */
   useEffect(() => {
+    let warnTimer: number | null = null
+    let focusTimer: number | null = null
+
+    const clearTimers = () => {
+      if (warnTimer != null) window.clearTimeout(warnTimer)
+      if (focusTimer != null) window.clearTimeout(focusTimer)
+      warnTimer = null
+      focusTimer = null
+    }
+
     window.setFocusState = (isFocused: boolean) => {
-      setFocusState((prev) => {
-        if (prev === "getting_started") return prev
-        if (isFocused) return "focused"
-        if (prev === "focused") return "warning"
-        if (prev === "warning") return "warning"
-        if (prev === "distracted") return "distracted"
-        return "warning"
-      })
+      // Don't let per-frame noise flip UI states multiple times per second.
+      // We only debounce transitions between `focused` and `warning`.
+      if (isFocused) {
+        if (warnTimer != null) {
+          window.clearTimeout(warnTimer)
+          warnTimer = null
+        }
+        if (focusTimer != null) return
+        focusTimer = window.setTimeout(() => {
+          focusTimer = null
+          setFocusState((prev) => {
+            if (prev === "getting_started") return prev
+            if (prev === "distracted") return prev
+            return "focused"
+          })
+        }, FOCUS_SIGNAL_TO_FOCUSED_DELAY_MS)
+        return
+      }
+
+      if (focusTimer != null) {
+        window.clearTimeout(focusTimer)
+        focusTimer = null
+      }
+      if (warnTimer != null) return
+      warnTimer = window.setTimeout(() => {
+        warnTimer = null
+        setFocusState((prev) => {
+          if (prev === "getting_started") return prev
+          if (prev === "distracted") return prev
+          return prev === "focused" ? "warning" : "warning"
+        })
+      }, FOCUS_SIGNAL_TO_WARNING_DELAY_MS)
     }
     return () => {
+      clearTimers()
       delete window.setFocusState
     }
   }, [])
@@ -448,6 +490,8 @@ export function FocusWidget({
       delete window.getTtsEnabled
     }
   }, [ttsEnabled])
+
+  // Theme toggle is scoped to this widget root via className (`dark`), not global document.
 
   /** Webcam + MediaPipe — only after the user leaves “getting started”. Depends on `pastSetup`, not every `focusState`, so we don’t restart on focused ↔ warning. */
   const pastGettingStarted = focusState !== "getting_started"
@@ -861,6 +905,7 @@ export function FocusWidget({
       activityMode,
       minimized,
       ttsEnabled,
+      darkMode,
       settingsOpen: false,
     })
     setSessionElapsedSeconds(0)
@@ -877,6 +922,7 @@ export function FocusWidget({
     activityMode,
     minimized,
     ttsEnabled,
+    darkMode,
   ])
 
   const adjustSessionGoal = useCallback((deltaMinutes: number) => {
@@ -938,6 +984,7 @@ export function FocusWidget({
       data-extension-widget-root
       className={cn(
         "fixed z-[9999] transition-all duration-300",
+        darkMode && "dark",
         positionClasses[position],
         (position === "top-right" || position === "top-left") && "origin-top",
         (position === "bottom-right" || position === "bottom-left") &&
@@ -957,7 +1004,10 @@ export function FocusWidget({
           settingsOpen
             ? "flex max-h-[min(90vh,calc(100vh-2rem))] w-[min(28rem,calc(100vw-1.25rem))] max-w-[96vw] flex-col overflow-hidden"
             : "w-72 overflow-hidden",
-          "bg-background/95 backdrop-blur-sm supports-[backdrop-filter]:bg-background/80"
+          // Light mode: glass panel. Dark mode: solid panel.
+          darkMode
+            ? "bg-neutral-800"
+            : "bg-background/95 backdrop-blur-sm supports-[backdrop-filter]:bg-background/80",
         )}
       >
         {/* Header — title left; TTS, minimize, settings, close on the right */}
@@ -979,9 +1029,27 @@ export function FocusWidget({
               onClick={() => setTtsEnabled((v) => !v)}
             >
               {ttsEnabled ? (
-                <Mic className="size-3.5" aria-hidden />
+                <Volume2 className="size-3.5" aria-hidden />
               ) : (
-                <MicOff className="size-3.5 opacity-70" aria-hidden />
+                <VolumeX className="size-3.5 opacity-70" aria-hidden />
+              )}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "size-6 text-muted-foreground hover:text-foreground",
+                darkMode && "text-foreground",
+              )}
+              aria-pressed={darkMode}
+              aria-label={darkMode ? "Turn dark mode off" : "Turn dark mode on"}
+              onClick={() => setDarkMode((v) => !v)}
+            >
+              {darkMode ? (
+                <Moon className="size-3.5" aria-hidden />
+              ) : (
+                <Sun className="size-3.5 opacity-70" aria-hidden />
               )}
             </Button>
             <Button
@@ -1177,16 +1245,18 @@ export function FocusWidget({
                       className={cn(
                         "relative h-1.5 w-full overflow-hidden rounded-full border-0",
                         isGettingStarted &&
-                          "bg-muted ring-1 ring-border",
+                          "bg-muted ring-1 ring-border dark:bg-neutral-700 dark:ring-neutral-600",
                         isCalibrating &&
-                          "bg-blue-500/20 ring-1 ring-blue-500/35",
-                        isWarning && "bg-yellow-500/20 ring-1 ring-yellow-500/35",
-                        isDistracted && "bg-amber-500/20 ring-1 ring-amber-500/35",
+                          "bg-blue-500/20 ring-1 ring-blue-500/35 dark:bg-blue-400/20 dark:ring-blue-400/45",
+                        isWarning &&
+                          "bg-yellow-500/20 ring-1 ring-yellow-500/35 dark:bg-yellow-400/20 dark:ring-yellow-400/45",
+                        isDistracted &&
+                          "bg-amber-500/20 ring-1 ring-amber-500/35 dark:bg-amber-400/20 dark:ring-amber-400/45",
                         !isGettingStarted &&
                           !isCalibrating &&
                           !isWarning &&
                           !isDistracted &&
-                          "bg-emerald-500/20 ring-1 ring-emerald-500/35",
+                          "bg-emerald-500/20 ring-1 ring-emerald-500/35 dark:bg-emerald-400/20 dark:ring-emerald-400/45",
                       )}
                     >
                       <div
@@ -1204,18 +1274,18 @@ export function FocusWidget({
                         className={cn(
                           "box-border h-full min-h-[6px] rounded-full border-0",
                           isGettingStarted &&
-                            "!bg-violet-500 transition-[width] duration-300",
+                            "!bg-violet-500 transition-[width] duration-300 dark:!bg-violet-400",
                           isCalibrating &&
-                            "!bg-blue-500 transition-[width] duration-300",
+                            "!bg-blue-500 transition-[width] duration-300 dark:!bg-blue-400",
                           isWarning &&
-                            "!bg-yellow-500 transition-[width] duration-1000 ease-linear",
+                            "!bg-yellow-500 transition-[width] duration-1000 ease-linear dark:!bg-yellow-400",
                           isDistracted &&
-                            "!bg-amber-500 transition-[width] duration-300",
+                            "!bg-amber-500 transition-[width] duration-300 dark:!bg-amber-400",
                           !isGettingStarted &&
                             !isCalibrating &&
                             !isWarning &&
                             !isDistracted &&
-                            "!bg-emerald-500 transition-[width] duration-300",
+                            "!bg-emerald-500 transition-[width] duration-300 dark:!bg-emerald-400",
                         )}
                         style={{ width: `${barWidthPct}%` }}
                       />

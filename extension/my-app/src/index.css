@@ -73,6 +73,17 @@
     min-height: 0;
   }
 
+  /* If the browser paints the viewport behind transparent backgrounds, keep it transparent. */
+  html.extension-panel body {
+    background-color: transparent !important;
+  }
+
+  /* Some sites/UA styles can still show a white canvas unless we also clear color-scheme paint. */
+  html.extension-panel,
+  html.extension-panel body {
+    color-scheme: light dark;
+  }
+
   /* Shrink-wrap the iframe document to <App /> so scrollWidth/scrollHeight match the UI */
   html.extension-panel {
     width: max-content;

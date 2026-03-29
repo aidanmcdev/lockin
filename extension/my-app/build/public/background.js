@@ -22,6 +22,14 @@ function normalizeWorkerPostMethod(method) {
   return httpMethod
 }
 
+/** Keep the MV3 service worker alive during long async operations. */
+function keepAlive(promise) {
+  const interval = setInterval(() => {
+    chrome.runtime.getPlatformInfo(() => {})
+  }, 25_000)
+  return promise.finally(() => clearInterval(interval))
+}
+
 function sendFetchError(sendResponse, err) {
   const msg = err instanceof Error ? err.message : String(err)
   const detail =
@@ -326,6 +334,174 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         })
       })
       .catch((err) => sendFetchError(sendResponse, err))
+
+    return true
+  }
+
+  // --- Website productivity scoring ---
+
+  // In-memory cache + in-flight lock so we never fire duplicate Gemini requests
+  if (!self._siteScoreCache) self._siteScoreCache = {}
+  if (!self._siteScoreInFlight) self._siteScoreInFlight = {}
+
+  if (t === "LOCKIN_RATE_WEBSITE") {
+    const { token, geminiApiKey } = message
+
+    keepAlive((async () => {
+      try {
+        // 1. Find the active tab
+        const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+        if (!activeTab?.id || !activeTab.url) {
+          sendResponse({ ok: false, error: "No active tab found" })
+          return
+        }
+        const tabId = activeTab.id
+        const pageUrl = activeTab.url
+
+        // Skip non-http pages
+        if (!pageUrl.startsWith("http")) {
+          sendResponse({ ok: false, error: "Skipping non-http page" })
+          return
+        }
+
+        // Use hostname as the cache key (e.g. "youtube.com")
+        let hostname
+        try { hostname = new URL(pageUrl).hostname } catch (_) {
+          sendResponse({ ok: false, error: "Invalid URL" })
+          return
+        }
+
+        // 2a. Check in-memory cache first (instant, no network) — 10 min TTL
+        const cached = self._siteScoreCache[hostname]
+        if (cached && (Date.now() - cached.ts < 600_000)) {
+          sendResponse({ ok: true, score: cached.score, url: hostname, cached: true })
+          return
+        }
+
+        // 2b. If a Gemini request is already in-flight for this host, wait for it
+        if (self._siteScoreInFlight[hostname]) {
+          try {
+            const score = await self._siteScoreInFlight[hostname]
+            sendResponse({ ok: true, score, url: hostname, cached: true })
+          } catch (err) {
+            sendResponse({ ok: false, error: "In-flight request failed: " + (err.message || String(err)) })
+          }
+          return
+        }
+
+        // 2c. Check MongoDB cache via backend
+        try {
+          const cacheRes = await fetch(
+            `https://lockin-swart.vercel.app/api/site-score?url=${encodeURIComponent(hostname)}`
+          )
+          if (cacheRes.ok) {
+            const cacheData = await cacheRes.json()
+            if (cacheData.cached) {
+              self._siteScoreCache[hostname] = { score: cacheData.score, ts: Date.now() }
+              sendResponse({ ok: true, score: cacheData.score, url: hostname, cached: true })
+              return
+            }
+          }
+        } catch (err) {
+          console.warn("[lockin] MongoDB cache check failed, proceeding to Gemini:", err.message)
+        }
+
+        // 3. Call Gemini (with in-flight lock to prevent duplicate requests)
+        const geminiPromise = (async () => {
+          // Get DOM content from the tab's content script
+          const pageContent = await chrome.tabs.sendMessage(tabId, { type: "LOCKIN_GET_PAGE_CONTENT" })
+          if (!pageContent?.ok) throw new Error("Content script returned no data")
+
+          const GEMINI_API_KEY = geminiApiKey
+          if (!GEMINI_API_KEY) throw new Error("Gemini API key not configured")
+
+          const prompt = `You are a productivity analyst. Rate the following website on a scale of 0 to 10 for productivity, where 0 is completely unproductive (entertainment, social media, gaming) and 10 is highly productive (educational resources, work tools, documentation).
+
+Website: ${hostname}
+Page Title: ${pageContent.title}
+Page Content (excerpt): ${pageContent.bodyText}
+
+Respond with ONLY a single integer from 0 to 10. Nothing else.`
+
+          const geminiRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+              }),
+            }
+          )
+
+          if (geminiRes.status === 429) {
+            // Parse retry delay from response if available
+            let retryAfterMs = 30000
+            try {
+              const errBody = await geminiRes.json()
+              const retryInfo = errBody?.error?.details?.find(
+                (d) => d["@type"]?.includes("RetryInfo")
+              )
+              if (retryInfo?.retryDelay) {
+                const secs = parseFloat(retryInfo.retryDelay)
+                if (Number.isFinite(secs)) retryAfterMs = Math.ceil(secs * 1000)
+              }
+            } catch (_) { /* ignore parse errors */ }
+            const err = new Error("RATE_LIMITED")
+            err.retryAfterMs = retryAfterMs
+            throw err
+          }
+
+          if (!geminiRes.ok) {
+            const errText = await geminiRes.text().catch(() => "")
+            throw new Error("Gemini API error: " + geminiRes.status + " " + errText)
+          }
+
+          const geminiData = await geminiRes.json()
+          const responseText =
+            geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || ""
+          const score = parseInt(responseText.trim(), 10)
+
+          if (isNaN(score) || score < 0 || score > 10) {
+            throw new Error("Could not parse score: " + responseText)
+          }
+
+          // Cache in memory + MongoDB (keyed by hostname)
+          self._siteScoreCache[hostname] = { score, ts: Date.now() }
+          if (token) {
+            fetch("https://lockin-swart.vercel.app/api/site-score", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({ url: hostname, score, title: hostname }),
+            }).catch((err) => console.error("[lockin] Failed to cache site score:", err))
+          }
+
+          return score
+        })()
+
+        // Store promise so concurrent requests for the same host wait on it
+        self._siteScoreInFlight[hostname] = geminiPromise
+
+        try {
+          const score = await geminiPromise
+          sendResponse({ ok: true, score, url: hostname, cached: false })
+        } catch (err) {
+          const msg = err.message || String(err)
+          if (msg === "RATE_LIMITED") {
+            sendResponse({ ok: false, error: "rate_limited", retryAfterMs: err.retryAfterMs || 30000 })
+          } else {
+            sendResponse({ ok: false, error: msg })
+          }
+        } finally {
+          delete self._siteScoreInFlight[hostname]
+        }
+      } catch (err) {
+        sendResponse({ ok: false, error: "Rating failed: " + (err.message || String(err)) })
+      }
+    })())
 
     return true
   }

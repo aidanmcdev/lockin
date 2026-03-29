@@ -65,6 +65,31 @@ function mountPanel(opts = {}) {
       return
     }
 
+    // Widget requests a site productivity score — relay to background and post result back
+    if (d?.source === "lockin-extension-panel" && d?.type === "RATE_WEBSITE") {
+      const { token, geminiApiKey } = d
+      chrome.runtime.sendMessage(
+        { type: "LOCKIN_RATE_WEBSITE", token, geminiApiKey },
+        (res) => {
+          const err = chrome.runtime.lastError
+          if (iframe.contentWindow) {
+            if (err) {
+              iframe.contentWindow.postMessage(
+                { source: "lockin-extension", type: "SITE_SCORE_RESULT", ok: false, error: err.message || "Service worker unavailable" },
+                "*"
+              )
+            } else {
+              iframe.contentWindow.postMessage(
+                { source: "lockin-extension", type: "SITE_SCORE_RESULT", ...res },
+                "*"
+              )
+            }
+          }
+        }
+      )
+      return
+    }
+
     if (d?.source === EXT_MSG.source && d?.type === EXT_MSG.type) {
       window.removeEventListener("message", onWindowMessage)
       host.remove()
@@ -113,3 +138,4 @@ function runWhenBodyReady(fn) {
 runWhenBodyReady(() => {
   mountPanel()
 })
+

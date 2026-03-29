@@ -210,6 +210,7 @@ export function FocusWidget({
 
   // ── Site productivity scoring ──
   const [currentSiteScore, setCurrentSiteScore] = useState<number | null>(null)
+  const currentSiteScoreRef = useRef<number | null>(null)
   const [siteScoreLoading, setSiteScoreLoading] = useState(false)
   const siteScoresRef = useRef<SiteScoreEntry[]>([])
   const lastScoredUrlRef = useRef<string | null>(null)
@@ -355,66 +356,98 @@ export function FocusWidget({
     return () => window.clearInterval(id)
   }, [focusState])
 
-  /** Poll for URL changes during active session and request productivity scoring. */
+  /** Request site productivity score via postMessage to content script (which relays to background). */
+  const inSession = focusState !== "getting_started"
   useEffect(() => {
-    if (focusState === "getting_started" || !token) return
+    if (!inSession || !token) return
 
     let cancelled = false
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+    let pollMs = 30_000
+    let backoffMultiplier = 1
+    let waitingForResponse = false
 
-    const rateCurrentPage = async () => {
-      try {
-        // Get the active tab's URL and ID
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
-        const tab = tabs[0]
-        if (!tab?.id || !tab.url || cancelled) return
+    // Restore score from ref if we already have one (e.g. effect re-ran)
+    if (currentSiteScoreRef.current !== null) {
+      setCurrentSiteScore(currentSiteScoreRef.current)
+    }
 
-        // Skip chrome:// and extension pages
-        if (tab.url.startsWith("chrome") || tab.url.startsWith("about:")) return
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data
+      if (d?.source !== "lockin-extension" || d?.type !== "SITE_SCORE_RESULT") return
+      if (cancelled) return
 
-        // Don't re-score the same URL
-        if (tab.url === lastScoredUrlRef.current) return
-        lastScoredUrlRef.current = tab.url
+      waitingForResponse = false
 
-        setSiteScoreLoading(true)
-        const res = await chrome.runtime.sendMessage({
-          type: "LOCKIN_RATE_WEBSITE",
-          tabId: tab.id,
-          url: tab.url,
-          token,
-          geminiApiKey: import.meta.env.VITE_GEMINI_API_KEY,
-        })
-
-        if (cancelled) return
-
-        if (res?.ok && typeof res.score === "number") {
-          setCurrentSiteScore(res.score)
+      if (d.ok && typeof d.score === "number") {
+        const url = (d.url as string) || "unknown"
+        currentSiteScoreRef.current = d.score as number
+        setCurrentSiteScore(d.score as number)
+        setSiteScoreLoading(false)
+        pollMs = d.cached ? 60_000 : 30_000
+        backoffMultiplier = Math.max(1, backoffMultiplier / 2)
+        if (url !== lastScoredUrlRef.current) {
+          lastScoredUrlRef.current = url
           siteScoresRef.current.push({
-            url: tab.url,
-            score: res.score,
+            url,
+            score: d.score as number,
             visitedAt: sessionElapsedSeconds,
           })
-        } else {
-          console.warn("[lockin] Site score failed:", res?.error)
         }
-      } catch (err) {
-        console.error("[lockin] Site scoring error:", err)
-      } finally {
-        if (!cancelled) setSiteScoreLoading(false)
+      } else {
+        if (d.error === "rate_limited") {
+          const baseDelay = typeof d.retryAfterMs === "number" ? d.retryAfterMs : 30_000
+          pollMs = Math.min(baseDelay * backoffMultiplier, 300_000)
+          backoffMultiplier = Math.min(backoffMultiplier * 2, 16)
+          console.warn(`[lockin] Rate limited, retrying in ${Math.round(pollMs / 1000)}s (backoff x${backoffMultiplier / 2})`)
+        }
+        // On error, keep showing previous score
+        if (currentSiteScoreRef.current !== null) {
+          setCurrentSiteScore(currentSiteScoreRef.current)
+        }
+        setSiteScoreLoading(false)
+      }
+
+      if (!cancelled) {
+        pollTimer = setTimeout(requestScore, pollMs)
       }
     }
 
-    // Score immediately on entering session
-    rateCurrentPage()
+    const requestScore = () => {
+      if (cancelled || waitingForResponse) return
+      waitingForResponse = true
+      // Only show "Scoring…" if we've never gotten a score
+      if (currentSiteScoreRef.current === null) setSiteScoreLoading(true)
+      window.parent.postMessage({
+        source: "lockin-extension-panel",
+        type: "RATE_WEBSITE",
+        token,
+        geminiApiKey: import.meta.env.VITE_GEMINI_API_KEY,
+      }, "*")
 
-    // Poll every 5 seconds for URL changes
-    const interval = window.setInterval(rateCurrentPage, 5000)
+      // Safety timeout — if no response in 20s, unlock and retry
+      setTimeout(() => {
+        if (waitingForResponse && !cancelled) {
+          waitingForResponse = false
+          setSiteScoreLoading(false)
+          if (currentSiteScoreRef.current !== null) {
+            setCurrentSiteScore(currentSiteScoreRef.current)
+          }
+          pollTimer = setTimeout(requestScore, pollMs)
+        }
+      }, 20_000)
+    }
+
+    window.addEventListener("message", onMessage)
+    requestScore()
 
     return () => {
       cancelled = true
-      window.clearInterval(interval)
+      if (pollTimer) clearTimeout(pollTimer)
+      window.removeEventListener("message", onMessage)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusState, token])
+  }, [inSession, token])
 
   /** Face / gaze pipeline calls `window.setFocusState(true|false)` each frame — map into widget states. */
   useEffect(() => {
@@ -848,6 +881,7 @@ export function FocusWidget({
     sessionStartedAtRef.current = null
     siteScoresRef.current = []
     lastScoredUrlRef.current = null
+    currentSiteScoreRef.current = null
     setCurrentSiteScore(null)
 
     // Ensure future tabs (and refresh) don't rehydrate into an in-progress session.

@@ -6,10 +6,6 @@
  *
  * Usage:
  *   ./extract_vitals --input_video_path=/path/to/video.mp4 --api_key=YOUR_KEY
- *
- * Or with environment variable:
- *   export SMARTSPECTRA_API_KEY=YOUR_KEY
- *   ./extract_vitals --input_video_path=/path/to/video.mp4
  */
 
 #include <string>
@@ -32,12 +28,10 @@
 namespace spectra = presage::smartspectra;
 namespace settings = presage::smartspectra::container::settings;
 namespace vs = presage::smartspectra::video_source;
-using DeviceType = presage::platform_independence::DeviceType;
 
 ABSL_FLAG(std::string, input_video_path, "", "Path to video file to process.");
 ABSL_FLAG(std::string, api_key, "", "Presage API key. Falls back to SMARTSPECTRA_API_KEY env var.");
-ABSL_FLAG(std::string, output_file, "", "Optional: write JSON output to this file instead of stdout.");
-ABSL_FLAG(bool, save_metrics_to_disk, true, "Save metrics JSON to output directory.");
+ABSL_FLAG(bool, save_metrics_to_disk, false, "Save metrics JSON to output directory.");
 ABSL_FLAG(std::string, output_directory, "/tmp/presage_out", "Directory for metrics output.");
 
 int main(int argc, char** argv) {
@@ -53,7 +47,6 @@ int main(int argc, char** argv) {
     std::string video_path = absl::GetFlag(FLAGS_input_video_path);
     std::string api_key = absl::GetFlag(FLAGS_api_key);
     std::string output_dir = absl::GetFlag(FLAGS_output_directory);
-    std::string output_file = absl::GetFlag(FLAGS_output_file);
     bool save_to_disk = absl::GetFlag(FLAGS_save_metrics_to_disk);
 
     // Fall back to env var for API key
@@ -79,41 +72,26 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // Use Continuous mode with REST integration to process the video file
-    settings::Settings<settings::OperationMode::Continuous, settings::IntegrationMode::Rest> s{
-        vs::VideoSourceSettings{
-            /*camera_device_index=*/0,
-            /*resolution_selection_mode=*/vs::ResolutionSelectionMode::Auto,
-            /*capture_width_px=*/-1,
-            /*capture_height_px=*/-1,
-            /*resolution_range=*/presage::camera::CameraResolutionRange::Unspecified_EnumEnd,
-            /*codec=*/presage::camera::CaptureCodec::MJPG,
-            /*auto_lock=*/true,
-            /*input_transform_mode=*/vs::InputTransformMode::Unspecified_EnumEnd,
-            /*input_video_path=*/video_path,
-            /*input_video_time_path=*/std::string(""),
-        },
-        settings::VideoSinkSettings{},
-        /*headless=*/true,
-        /*interframe_delay=*/1,
-        /*start_with_recording_on=*/true,
-        /*start_time_offset_ms=*/0,
-        /*scale_input=*/true,
-        /*binary_graph=*/true,
-        /*enable_phasic_bp=*/std::optional<bool>(),
-        /*enable_eda=*/std::optional<bool>(),
-        /*enable_dense_facemesh_points=*/false,
-        /*use_full_range_face_detection=*/std::optional<bool>(),
-        /*use_full_pose_landmarks=*/std::optional<bool>(),
-        /*enable_pose_landmark_segmentation=*/std::optional<bool>(),
-        /*enable_micromotion=*/std::optional<bool>(),
-        /*enable_edge_metrics=*/false,
-        /*print_graph_contents=*/false,
-        /*log_transfer_timing_info=*/false,
-        /*verbosity=*/1,
-        settings::ContinuousSettings{/*buffer_duration=*/0.2},
-        settings::RestSettings{api_key}
-    };
+    // Build settings by setting fields individually
+    settings::Settings<settings::OperationMode::Continuous, settings::IntegrationMode::Rest> s;
+
+    // Video source — use pre-recorded video file
+    s.video_source.input_video_path = video_path;
+
+    // General settings
+    s.headless = true;
+    s.start_with_recording_on = true;
+    s.interframe_delay_ms = 1;
+    s.scale_input = true;
+    s.binary_graph = true;
+    s.enable_edge_metrics = false;
+    s.verbosity_level = 1;
+
+    // Continuous mode settings
+    s.continuous.preprocessed_data_buffer_duration_s = 0.2;
+
+    // REST integration
+    s.integration.api_key = api_key;
 
     spectra::container::CpuContinuousRestForegroundContainer container(s);
 
@@ -168,15 +146,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Wrap in a result envelope
     std::cout << "{\"status\": \"complete\", \"metrics\": " << last_metrics_json << "}" << std::endl;
-
-    if (!output_file.empty()) {
-        std::ofstream f(output_file);
-        f << "{\"status\": \"complete\", \"metrics\": " << last_metrics_json << "}";
-        f.close();
-        LOG(INFO) << "Results written to " << output_file;
-    }
 
     return EXIT_SUCCESS;
 }

@@ -4,6 +4,8 @@
  *
  * Response shape: `{ status, frames_processed, results: { vitals, attentiveness, metadata, … } }`.
  */
+import { formatAdjustedAttentivenessScore } from "@/lib/attentivenessScore"
+
 export const PRESAGE_PROCESS_SYNC_PATH = "/api/process-sync" as const
 
 const DEFAULT_PRESAGE_ORIGIN = "https://distal-nisha-trigonometrically.ngrok-free.dev"
@@ -521,7 +523,8 @@ function tryParsePresageProcessSync(obj: Record<string, unknown>): ProcessSyncPa
     const quality = att.data_quality
     const factors = att.factors_available
     const parts: string[] = []
-    if (typeof score === "number") parts.push(`Score ${score}`)
+    if (typeof score === "number")
+      parts.push(`Score ${formatAdjustedAttentivenessScore(score)}`)
     if (typeof label === "string") {
       parts.push(humanizeKey(label.replace(/_/g, " ")))
     }

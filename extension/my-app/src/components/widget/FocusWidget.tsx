@@ -5,7 +5,6 @@ import {
   useEffect,
   useCallback,
   useRef,
-  useLayoutEffect,
   useMemo,
 } from "react"
 import { cn } from "@/lib/utils"
@@ -27,6 +26,7 @@ import {
   STEADY_DISTRACTED_NUDGE_MS,
   type FocusDebugSnapshot,
 } from "@/focusDetection"
+import { formatAdjustedAttentivenessScore } from "@/lib/attentivenessScore"
 import {
   type ProcessSyncParsed,
 } from "@/lib/processSyncApi"
@@ -52,6 +52,7 @@ import {
   getLeagueLeaderboard,
   type SessionEvent,
 } from "@/lib/api"
+import { useIframeResizeToParent } from "@/lib/iframeParentSize"
 
 export type WidgetPosition =
   | "bottom-right"
@@ -140,12 +141,6 @@ type VitalsUploadLogEntry = {
   filename?: string
   errorMessage?: string
 }
-
-/** Posted to `window.parent` so the content-script iframe can size to this panel (fixed layout is invisible to parent `scrollHeight`). */
-const IFRAME_SIZE_MSG = {
-  source: "lockin-extension-panel",
-  type: "SIZE",
-} as const
 
 export function FocusWidget({
   initialFocusState = "getting_started",
@@ -498,7 +493,7 @@ export function FocusWidget({
       },
       onAttentivenessUpdate: (payload: AttentivenessUpdatePayload) => {
         const att = payload.attentiveness
-        const label = `Score ${att.score} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
+        const label = `Score ${formatAdjustedAttentivenessScore(att.score)} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
         const attentivenessSubRows: { label: string; value: string }[] = []
         if (att.sub_scores) {
           for (const [key, val] of Object.entries(att.sub_scores)) {
@@ -650,34 +645,7 @@ export function FocusWidget({
     }
   }, [focusState])
 
-  useLayoutEffect(() => {
-    const el = rootRef.current
-    if (!el) return
-
-    const postSize = () => {
-      const r = el.getBoundingClientRect()
-      window.parent.postMessage(
-        {
-          ...IFRAME_SIZE_MSG,
-          width: Math.ceil(r.width),
-          height: Math.ceil(r.height),
-        },
-        "*",
-      )
-    }
-
-    postSize()
-    const ro = new ResizeObserver(() => postSize())
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [
-    settingsOpen,
-    minimized,
-    position,
-    vitalsLiveTick,
-    vitalsUploadLog.length,
-    vitalsSyncPhase,
-  ])
+  useIframeResizeToParent(rootRef)
 
   // Entry animation
   useEffect(() => {

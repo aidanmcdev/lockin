@@ -17,15 +17,24 @@ import {
   type ActivityMode,
 } from "@/components/widget/ActivityModeRow"
 import { Leaderboard, type LeaderboardEntry } from "@/components/widget/Leaderboard"
-import { Maximize2, Mic, MicOff, Minimize2, Settings, X } from "lucide-react"
+import { Activity, Maximize2, Mic, MicOff, Minimize2, Settings, X } from "lucide-react"
 import {
   getFocusDebugSnapshot,
   getFocusDetectionCanvas,
+  getFocusDetectionVideo,
   speakFocusNudge,
   startFocusDetection,
   STEADY_DISTRACTED_NUDGE_MS,
   type FocusDebugSnapshot,
 } from "@/focusDetection"
+import { startMinuteChunkRecorder } from "@/lib/minuteChunkRecorder"
+import {
+  filenameForProcessSyncBlob,
+  parseProcessSyncResponse,
+  uploadProcessSyncVideo,
+  type ProcessSyncParsed,
+} from "@/lib/processSyncApi"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   hydrateWidgetState,
   parsePersistedWidgetStateJson,
@@ -80,6 +89,28 @@ const defaultLeaderboardEntries: LeaderboardEntry[] = [
   { id: "current", name: "You", focusTime: 187, rank: 4, previousRank: 5, isCurrentUser: true, avatarUrl: "" },
   { id: "5", name: "Taylor Smith", focusTime: 165, rank: 5, previousRank: 4, avatarUrl: "" },
 ]
+
+const VITALS_SEGMENT_MS = 60_000
+
+type VitalsSyncPhaseModel =
+  | "idle"
+  | "waiting_camera"
+  | "recording"
+  | "uploading"
+
+type VitalsUploadLogEntry = {
+  chunkIndex: number
+  ok: boolean
+  finishedAt: number
+  bytes: number
+  /** Camera / multipart `fps` (process-sync). */
+  fps?: number
+  /** MediaRecorder / blob MIME (e.g. video/webm, video/mp4). */
+  mimeType?: string
+  /** Name sent in multipart (e.g. segment-….webm). */
+  filename?: string
+  errorMessage?: string
+}
 
 /** Posted to `window.parent` so the content-script iframe can size to this panel (fixed layout is invisible to parent `scrollHeight`). */
 const IFRAME_SIZE_MSG = {
@@ -142,6 +173,37 @@ export function FocusWidget({
   const [focusDebugSnap, setFocusDebugSnap] = useState<FocusDebugSnapshot | null>(
     null,
   )
+
+  type VitalsSyncSnapshot = ProcessSyncParsed & {
+    chunkIndex: number
+    recordedAt: number
+    /** Camera track reported FPS. */
+    segmentFps: number
+    /** Same value sent as multipart `fps` (often matches camera track). */
+    segmentUploadFps: number
+    segmentMimeType: string
+    segmentFilename: string
+  }
+
+  const [vitalsSyncPhase, setVitalsSyncPhase] =
+    useState<VitalsSyncPhaseModel>("idle")
+  const [vitalsSyncError, setVitalsSyncError] = useState<string | null>(null)
+  const [vitalsSyncSnapshot, setVitalsSyncSnapshot] =
+    useState<VitalsSyncSnapshot | null>(null)
+  const [vitalsWaitCameraStartedAt, setVitalsWaitCameraStartedAt] = useState<
+    number | null
+  >(null)
+  const [vitalsRecordingStartedAt, setVitalsRecordingStartedAt] = useState<
+    number | null
+  >(null)
+  const [vitalsSegmentStartedAt, setVitalsSegmentStartedAt] = useState<
+    number | null
+  >(null)
+  const [vitalsUploadLog, setVitalsUploadLog] = useState<VitalsUploadLogEntry[]>(
+    [],
+  )
+  const [vitalsLiveTick, setVitalsLiveTick] = useState(0)
+  const vitalsUploadChainRef = useRef(Promise.resolve())
 
   const safeGraceTotal = Math.max(1, graceTotal)
 
@@ -266,6 +328,149 @@ export function FocusWidget({
     }
   }, [enableCameraFocusDetection, pastGettingStarted])
 
+  /** Live timers in Settings (waiting / total record / segment progress). */
+  useEffect(() => {
+    if (!enableCameraFocusDetection || !pastGettingStarted) return
+    if (vitalsWaitCameraStartedAt === null && vitalsRecordingStartedAt === null) {
+      return
+    }
+    const id = window.setInterval(() => {
+      setVitalsLiveTick((n) => n + 1)
+    }, 500)
+    return () => window.clearInterval(id)
+  }, [
+    enableCameraFocusDetection,
+    pastGettingStarted,
+    vitalsWaitCameraStartedAt,
+    vitalsRecordingStartedAt,
+  ])
+
+  /** ~1-minute **H.264/MP4** chunks when supported → `POST /api/process-sync` (vitals APIs often require avc1). */
+  useEffect(() => {
+    if (!enableCameraFocusDetection || !pastGettingStarted) {
+      setVitalsSyncPhase("idle")
+      setVitalsWaitCameraStartedAt(null)
+      setVitalsRecordingStartedAt(null)
+      setVitalsSegmentStartedAt(null)
+      setVitalsUploadLog([])
+      return
+    }
+
+    if (typeof MediaRecorder === "undefined") {
+      setVitalsSyncError("Video recording is not supported in this browser.")
+      setVitalsSyncPhase("idle")
+      setVitalsWaitCameraStartedAt(null)
+      setVitalsRecordingStartedAt(null)
+      setVitalsSegmentStartedAt(null)
+      return
+    }
+
+    setVitalsSyncPhase("waiting_camera")
+    setVitalsSyncError(null)
+    setVitalsWaitCameraStartedAt(Date.now())
+    setVitalsRecordingStartedAt(null)
+    setVitalsSegmentStartedAt(null)
+    setVitalsUploadLog([])
+    vitalsUploadChainRef.current = Promise.resolve()
+
+    const stopRecorder = startMinuteChunkRecorder({
+      getStream: () => {
+        const v = getFocusDetectionVideo()
+        return (v?.srcObject as MediaStream | null) ?? null
+      },
+      intervalMs: VITALS_SEGMENT_MS,
+      onRecordingStarted: () => {
+        const t = Date.now()
+        setVitalsWaitCameraStartedAt(null)
+        setVitalsRecordingStartedAt(t)
+        setVitalsSegmentStartedAt(t)
+        setVitalsSyncPhase("recording")
+      },
+      onChunk: (blob, { index, fps }) => {
+        const segmentBoundaryAt = Date.now()
+        setVitalsSegmentStartedAt(segmentBoundaryAt)
+
+        console.log("[vitals-sync] video segment blob", {
+          chunkIndex: index,
+          fps,
+          sizeBytes: blob.size,
+          type: blob.type,
+          blob,
+        })
+
+        vitalsUploadChainRef.current = vitalsUploadChainRef.current.then(
+          async () => {
+            setVitalsSyncPhase("uploading")
+            const bytes = blob.size
+            const finishedAt = Date.now()
+            const segmentFilename = filenameForProcessSyncBlob(blob)
+            const segmentMimeType = blob.type?.trim() || "—"
+            try {
+              const raw = await uploadProcessSyncVideo(blob, { fps })
+              const parsed = parseProcessSyncResponse(raw)
+              setVitalsSyncSnapshot({
+                ...parsed,
+                chunkIndex: index,
+                recordedAt: finishedAt,
+                segmentFps: fps,
+                segmentUploadFps: fps,
+                segmentMimeType,
+                segmentFilename,
+              })
+              setVitalsSyncError(null)
+              setVitalsUploadLog((prev) =>
+                [
+                  {
+                    chunkIndex: index,
+                    ok: true,
+                    finishedAt,
+                    bytes,
+                    fps,
+                    mimeType: segmentMimeType,
+                    filename: segmentFilename,
+                  },
+                  ...prev,
+                ].slice(0, 20),
+              )
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              setVitalsSyncError(msg)
+              setVitalsUploadLog((prev) =>
+                [
+                  {
+                    chunkIndex: index,
+                    ok: false,
+                    finishedAt,
+                    bytes,
+                    fps,
+                    mimeType: segmentMimeType,
+                    filename: segmentFilename,
+                    errorMessage: msg,
+                  },
+                  ...prev,
+                ].slice(0, 20),
+              )
+            } finally {
+              setVitalsSyncPhase("recording")
+            }
+          },
+        )
+      },
+      onError: (err) => {
+        setVitalsSyncError(err instanceof Error ? err.message : String(err))
+      },
+    })
+
+    return () => {
+      stopRecorder()
+      setVitalsSyncPhase("idle")
+      setVitalsWaitCameraStartedAt(null)
+      setVitalsRecordingStartedAt(null)
+      setVitalsSegmentStartedAt(null)
+      setVitalsUploadLog([])
+    }
+  }, [enableCameraFocusDetection, pastGettingStarted])
+
   // When entering warning, start (or restart) the grace countdown from full duration.
   useEffect(() => {
     if (focusState !== "warning") return
@@ -344,7 +549,14 @@ export function FocusWidget({
     const ro = new ResizeObserver(() => postSize())
     ro.observe(el)
     return () => ro.disconnect()
-  }, [settingsOpen, minimized, position])
+  }, [
+    settingsOpen,
+    minimized,
+    position,
+    vitalsLiveTick,
+    vitalsUploadLog.length,
+    vitalsSyncPhase,
+  ])
 
   // Entry animation
   useEffect(() => {
@@ -434,6 +646,20 @@ export function FocusWidget({
       ? 0
       : sessionProgress
 
+  const vitalsLiveNowMs = Date.now() + 0 * vitalsLiveTick
+  const vitalsLiveForSettings =
+    enableCameraFocusDetection && (pastGettingStarted || vitalsUploadLog.length > 0)
+      ? {
+          nowMs: vitalsLiveNowMs,
+          waitCameraStartedAt: vitalsWaitCameraStartedAt,
+          recordingStartedAt: vitalsRecordingStartedAt,
+          segmentStartedAt: vitalsSegmentStartedAt,
+          segmentTargetMs: VITALS_SEGMENT_MS,
+          phase: vitalsSyncPhase,
+          uploads: vitalsUploadLog,
+        }
+      : undefined
+
   if (!isVisible) return null
 
   return (
@@ -457,15 +683,15 @@ export function FocusWidget({
     >
       <Card
         className={cn(
-          "overflow-hidden border shadow-lg",
+          "border shadow-lg",
           settingsOpen
-            ? "w-[min(28rem,calc(100vw-1.25rem))] max-w-[96vw]"
-            : "w-72",
+            ? "flex max-h-[min(90vh,calc(100vh-2rem))] w-[min(28rem,calc(100vw-1.25rem))] max-w-[96vw] flex-col overflow-hidden"
+            : "w-72 overflow-hidden",
           "bg-background/95 backdrop-blur-sm supports-[backdrop-filter]:bg-background/80"
         )}
       >
         {/* Header — title left; TTS, minimize, settings, close on the right */}
-        <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2.5">
           <span className="text-sm font-semibold tracking-tight">Lock-In.tech</span>
           <div className="flex items-center gap-0.5">
             <Button
@@ -540,48 +766,74 @@ export function FocusWidget({
 
         {settingsOpen ? (
           <div
-            className="min-h-[min(22rem,calc(100vh-6rem))] border-b border-border bg-muted/30 p-5"
+            className="flex min-h-0 flex-1 flex-col bg-muted/30"
             role="region"
             aria-label="Settings"
           >
-            <div className="mb-4 flex items-center justify-between gap-2">
-              <h2 className="text-base font-semibold tracking-tight">Settings</h2>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={() => setSettingsOpen(false)}
-              >
-                Done
-              </Button>
+            <div className="shrink-0 border-b border-border/80 bg-muted/30 px-5 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-base font-semibold tracking-tight">Settings</h2>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={() => setSettingsOpen(false)}
+                >
+                  Done
+                </Button>
+              </div>
             </div>
 
-            {enableCameraFocusDetection ? (
-              <div className="space-y-4">
-                <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Detection overlay
-                  </p>
-                  <canvas
-                    ref={settingsCanvasRef}
-                    className="aspect-video w-full max-w-xl rounded-md border border-border bg-black object-contain"
-                    aria-label="Face detection preview with bounding box"
-                  />
-                </div>
+            <div
+              className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-y-contain px-5 py-4"
+              tabIndex={0}
+            >
+              {enableCameraFocusDetection ? (
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Detection overlay
+                    </p>
+                    <canvas
+                      ref={settingsCanvasRef}
+                      className="aspect-video w-full max-w-xl rounded-md border border-border bg-black object-contain"
+                      aria-label="Face detection preview with bounding box"
+                    />
+                  </div>
 
-                <div>
-                  <p className="mb-2 text-xs font-medium text-muted-foreground">
-                    Frame data
-                  </p>
-                  <FocusDebugSnapshotPanel snap={focusDebugSnap} />
+                  <div>
+                    <p className="mb-2 text-xs font-medium text-muted-foreground">
+                      Frame data
+                    </p>
+                    <FocusDebugSnapshotPanel snap={focusDebugSnap} />
+                  </div>
                 </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Camera focus detection is off — enable it to see the detection preview and metrics.
+                </p>
+              )}
+
+              <div
+                className={cn("space-y-2", enableCameraFocusDetection && "mt-6")}
+              >
+                <p className="text-xs font-medium text-muted-foreground">
+                  Vitals sync
+                </p>
+                <VitalsSyncPanel
+                  phase={
+                    enableCameraFocusDetection ? vitalsSyncPhase : "idle"
+                  }
+                  error={enableCameraFocusDetection ? vitalsSyncError : null}
+                  snapshot={
+                    enableCameraFocusDetection ? vitalsSyncSnapshot : null
+                  }
+                  cameraDisabled={!enableCameraFocusDetection}
+                  live={vitalsLiveForSettings}
+                />
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                Camera focus detection is off — enable it to see the detection preview and metrics.
-              </p>
-            )}
+            </div>
           </div>
         ) : (
           <CardContent className="space-y-4 p-3">
@@ -715,6 +967,325 @@ function formatDebugValue(value: unknown): string {
     }
   }
   return String(value)
+}
+
+function formatVitalsDurationMs(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+  }
+  return `${m}:${String(s).padStart(2, "0")}`
+}
+
+function formatVitalsBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—"
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`
+}
+
+function vitalsPhaseLabel(phase: VitalsSyncPhaseModel) {
+  if (phase === "idle") return "Not started"
+  if (phase === "waiting_camera") return "Waiting for camera…"
+  if (phase === "uploading") return "Uploading segment…"
+  return "Recording (1 min)"
+}
+
+function VitalsSyncPanel({
+  phase,
+  error,
+  snapshot,
+  cameraDisabled = false,
+  live,
+}: {
+  phase: VitalsSyncPhaseModel
+  error: string | null
+  snapshot:
+    | (ProcessSyncParsed & {
+        chunkIndex: number
+        recordedAt: number
+        segmentFps: number
+        segmentUploadFps: number
+        segmentMimeType: string
+        segmentFilename: string
+      })
+    | null
+  /** Camera pipeline off — only the settings placeholder copy. */
+  cameraDisabled?: boolean
+  live?: {
+    nowMs: number
+    waitCameraStartedAt: number | null
+    recordingStartedAt: number | null
+    segmentStartedAt: number | null
+    segmentTargetMs: number
+    phase: VitalsSyncPhaseModel
+    uploads: VitalsUploadLogEntry[]
+  }
+}) {
+  if (cameraDisabled) {
+    return (
+      <div
+        className="space-y-2 rounded-lg border border-border bg-muted/25 p-3"
+        role="region"
+        aria-label="Vitals and attentiveness sync"
+      >
+        <div className="flex items-center gap-2">
+          <Activity
+            className="size-3.5 shrink-0 text-muted-foreground opacity-60"
+            aria-hidden
+          />
+          <span className="text-xs font-medium text-foreground">Vitals sync</span>
+          <span className="ml-auto truncate text-[10px] text-muted-foreground">
+            Unavailable
+          </span>
+        </div>
+        <p className="text-[10px] leading-snug text-muted-foreground">
+          Turn on camera focus detection to record 1-minute segments and upload
+          them to the vitals endpoint.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="space-y-2 rounded-lg border border-border bg-muted/25 p-3"
+      role="region"
+      aria-label="Vitals and attentiveness sync"
+    >
+      <div className="flex items-center gap-2">
+        <Activity
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground",
+            phase === "uploading" && "text-blue-600 dark:text-blue-400",
+            phase === "recording" && "text-emerald-600 dark:text-emerald-400",
+            phase === "waiting_camera" && "text-amber-600 dark:text-amber-400",
+          )}
+          aria-hidden
+        />
+        <span className="text-xs font-medium text-foreground">Vitals sync</span>
+        <span className="ml-auto truncate text-[10px] text-muted-foreground">
+          {vitalsPhaseLabel(phase)}
+        </span>
+      </div>
+
+      {live &&
+      (live.phase !== "idle" ||
+        live.uploads.length > 0 ||
+        live.waitCameraStartedAt != null) ? (
+        <div className="space-y-2 rounded-md border border-border bg-background/60 px-2.5 py-2">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Live status
+          </p>
+          <dl className="space-y-1.5 font-mono text-[10px] leading-snug">
+            {live.waitCameraStartedAt != null &&
+            live.phase === "waiting_camera" ? (
+              <div className="flex justify-between gap-2">
+                <dt className="text-muted-foreground">Waiting for camera</dt>
+                <dd className="shrink-0 tabular-nums text-foreground">
+                  {formatVitalsDurationMs(
+                    live.nowMs - live.waitCameraStartedAt,
+                  )}
+                </dd>
+              </div>
+            ) : null}
+            {live.recordingStartedAt != null ? (
+              <div className="flex justify-between gap-2">
+                <dt className="text-muted-foreground">Total recording</dt>
+                <dd className="shrink-0 tabular-nums text-foreground">
+                  {formatVitalsDurationMs(
+                    live.nowMs - live.recordingStartedAt,
+                  )}
+                </dd>
+              </div>
+            ) : null}
+            {live.segmentStartedAt != null &&
+            live.recordingStartedAt != null ? (
+              <div className="space-y-1">
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">Current segment</dt>
+                  <dd className="shrink-0 tabular-nums text-foreground">
+                    {formatVitalsDurationMs(
+                      live.nowMs - live.segmentStartedAt,
+                    )}{" "}
+                    /{" "}
+                    {formatVitalsDurationMs(live.segmentTargetMs)}
+                  </dd>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-emerald-500/90 transition-[width] duration-300"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        ((live.nowMs - live.segmentStartedAt) /
+                          live.segmentTargetMs) *
+                          100,
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+            <div className="flex justify-between gap-2 border-t border-border pt-1.5">
+              <dt className="font-sans text-muted-foreground">Send status</dt>
+              <dd className="text-right font-sans text-[10px] text-foreground">
+                {live.phase === "uploading"
+                  ? "Uploading to server…"
+                  : live.uploads[0]
+                    ? live.uploads[0].ok
+                      ? `Last send OK (segment ${live.uploads[0].chunkIndex + 1})`
+                      : `Last send failed (segment ${live.uploads[0].chunkIndex + 1})`
+                    : "No uploads yet"}
+              </dd>
+            </div>
+          </dl>
+
+          {live.uploads.length > 0 ? (
+            <div className="border-t border-border pt-2">
+              <p className="text-[10px] font-medium text-muted-foreground">
+                Upload log (newest first)
+              </p>
+              <ul
+                className="mt-1.5 max-h-36 space-y-1.5 overflow-y-auto pr-0.5 font-mono text-[10px] leading-snug"
+                aria-label="Vitals upload history"
+              >
+                {live.uploads.map((u, i) => (
+                  <li
+                    key={`${u.chunkIndex}-${u.finishedAt}-${i}`}
+                    className="rounded border border-border/80 bg-background/50 px-2 py-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={cn(
+                          "font-semibold",
+                          u.ok
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-destructive",
+                        )}
+                      >
+                        {u.ok ? "Success" : "Failed"}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-muted-foreground">
+                        seg {u.chunkIndex + 1}
+                        {typeof u.fps === "number" ? ` · ${u.fps} fps` : ""} ·{" "}
+                        {formatVitalsBytes(u.bytes)}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-muted-foreground">
+                      {new Date(u.finishedAt).toLocaleTimeString(undefined, {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}
+                      {u.filename || u.mimeType ? (
+                        <span className="mt-0.5 block break-all font-mono text-[9px] text-foreground/90">
+                          {u.filename}
+                          {u.filename && u.mimeType ? " · " : null}
+                          {u.mimeType}
+                        </span>
+                      ) : null}
+                      {u.errorMessage ? (
+                        <span className="mt-0.5 block text-destructive">
+                          {u.errorMessage}
+                        </span>
+                      ) : null}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {error ? (
+        <Alert variant="destructive" className="py-2">
+          <AlertTitle className="text-xs">Sync issue</AlertTitle>
+          <AlertDescription className="text-xs">{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {snapshot ? (
+        <div className="space-y-2 rounded-md border border-border bg-background/80 px-2.5 py-2">
+          <p className="text-[10px] font-medium text-muted-foreground">
+            Segment {snapshot.chunkIndex + 1}
+            <span className="tabular-nums text-muted-foreground/80">
+              {" "}
+              ·{" "}
+              {new Date(snapshot.recordedAt).toLocaleTimeString(undefined, {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
+            </span>
+          </p>
+          <dl className="space-y-1.5 text-[11px]">
+            <div className="flex justify-between gap-2">
+              <dt className="text-muted-foreground">File name</dt>
+              <dd className="min-w-0 break-all text-right font-mono text-[10px] text-foreground">
+                {snapshot.segmentFilename}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-muted-foreground">MIME type</dt>
+              <dd className="min-w-0 break-all text-right font-mono text-[10px] text-foreground">
+                {snapshot.segmentMimeType}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-muted-foreground">Camera FPS</dt>
+              <dd className="min-w-0 text-right font-mono text-[10px] tabular-nums text-foreground">
+                {snapshot.segmentFps}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-muted-foreground">Fps (multipart)</dt>
+              <dd className="min-w-0 text-right font-mono text-[10px] tabular-nums text-foreground">
+                {snapshot.segmentUploadFps}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-muted-foreground">Attentiveness</dt>
+              <dd className="min-w-0 text-right font-medium tabular-nums text-foreground">
+                {snapshot.attentiveness ?? "—"}
+              </dd>
+            </div>
+            {snapshot.vitalsRows.length ? (
+              <>
+                <div className="border-t border-border pt-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Vitals
+                </div>
+                {snapshot.vitalsRows.map((row) => (
+                  <div key={row.label} className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">{row.label}</dt>
+                    <dd className="min-w-0 break-all text-right font-mono text-[10px] text-foreground">
+                      {row.value}
+                    </dd>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <p className="text-[10px] text-muted-foreground">
+                No vitals fields in the last response — check server JSON shape.
+              </p>
+            )}
+          </dl>
+        </div>
+      ) : (
+        !error && (
+          <p className="text-[10px] leading-snug text-muted-foreground">
+            {phase === "idle"
+              ? "Start a session from the main panel. After that, 1-minute clips upload automatically when each segment completes."
+              : "Each minute begins processing when a segment finishes recording. Keep your face in frame for best results."}
+          </p>
+        )
+      )}
+    </div>
+  )
 }
 
 function FocusDebugSnapshotPanel({

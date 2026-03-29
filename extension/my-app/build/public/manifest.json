@@ -31,5 +31,8 @@
     }
   ],
   "permissions": ["tabs", "activeTab", "scripting", "camera"],
-  "host_permissions": ["http://localhost:3000/*"]
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://3.237.198.19:5000/*"
+  ]
 }

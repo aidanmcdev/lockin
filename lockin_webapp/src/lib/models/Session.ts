@@ -1,10 +1,11 @@
 import mongoose from "mongoose";
 
 export interface ISessionEvent {
-  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end";
+  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end" | "attentiveness";
   timestamp: number;
   duration?: number;
   details?: string;
+  value?: number; // 0-100 attentiveness score at this point
 }
 
 export interface ISession {
@@ -24,12 +25,13 @@ const eventSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ["phone_detected", "distraction", "refocus", "session_start", "session_end"],
+      enum: ["phone_detected", "distraction", "refocus", "session_start", "session_end", "attentiveness"],
       required: true,
     },
     timestamp: { type: Number, required: true },
     duration: { type: Number },
     details: { type: String },
+    value: { type: Number },
   },
   { _id: false }
 );

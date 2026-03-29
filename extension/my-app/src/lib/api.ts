@@ -19,10 +19,11 @@ async function authFetch(path: string, token: string, init?: RequestInit) {
 /* ── Sessions ───────────────────────────────────────────────── */
 
 export interface SessionEvent {
-  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end"
+  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end" | "attentiveness"
   timestamp: number
   duration?: number
   details?: string
+  value?: number // 0-100 attentiveness score at this point in time
 }
 
 export interface CreateSessionPayload {

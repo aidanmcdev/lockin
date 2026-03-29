@@ -8,10 +8,11 @@ import ScoreGauge from "@/components/dashboard/ScoreGauge";
 import SessionTimeline from "@/components/dashboard/SessionTimeline";
 
 interface SessionEvent {
-  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end";
+  type: "phone_detected" | "distraction" | "refocus" | "session_start" | "session_end" | "attentiveness";
   timestamp: number;
   duration?: number;
   details?: string;
+  value?: number;
 }
 
 interface SessionData {
@@ -121,6 +122,10 @@ export default function SessionDetailPage() {
   const events = session.events || [];
   const phonePickups = events.filter((e) => e.type === "phone_detected").length;
   const distractions = events.filter((e) => e.type === "distraction").length;
+  const attentivenessEvents = events.filter((e) => e.type === "attentiveness" && e.value != null);
+  const avgAttentiveness = attentivenessEvents.length > 0
+    ? Math.round(attentivenessEvents.reduce((sum, e) => sum + (e.value || 0), 0) / attentivenessEvents.length)
+    : null;
   const totalSeconds = session.focusedSeconds + session.distractedSeconds;
   const focusPct = totalSeconds > 0 ? (session.focusedSeconds / totalSeconds) * 100 : 0;
 
@@ -231,7 +236,19 @@ export default function SessionDetailPage() {
         </div>
 
         {/* Summary cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">
+          {avgAttentiveness !== null && (
+            <div className="p-4 rounded-xl bg-blue-50 border border-blue-200">
+              <p className="text-xs text-blue-600 font-medium">Avg Attentiveness</p>
+              <p className={`text-xl font-bold mt-1 ${
+                avgAttentiveness >= 80 ? "text-green-700" :
+                avgAttentiveness >= 60 ? "text-blue-700" :
+                avgAttentiveness >= 40 ? "text-amber-700" : "text-red-700"
+              }`}>
+                {avgAttentiveness}% 🧠
+              </p>
+            </div>
+          )}
           <div className="p-4 rounded-xl bg-green-50 border border-green-200">
             <p className="text-xs text-green-600 font-medium">Focused</p>
             <p className="text-xl font-bold text-green-700 mt-1">

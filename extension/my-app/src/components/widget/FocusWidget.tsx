@@ -493,7 +493,8 @@ export function FocusWidget({
       },
       onAttentivenessUpdate: (payload: AttentivenessUpdatePayload) => {
         const att = payload.attentiveness
-        const label = `Score ${formatAdjustedAttentivenessScore(att.score)} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
+        const adjustedScore = formatAdjustedAttentivenessScore(att.score)
+        const label = `Score ${adjustedScore} · ${att.label.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`
         const attentivenessSubRows: { label: string; value: string }[] = []
         if (att.sub_scores) {
           for (const [key, val] of Object.entries(att.sub_scores)) {
@@ -506,6 +507,21 @@ export function FocusWidget({
             })
           }
         }
+
+        // Record attentiveness event for session timeline
+        const scoreNum = typeof adjustedScore === "number" ? adjustedScore : parseFloat(String(adjustedScore))
+        if (!isNaN(scoreNum)) {
+          const elapsed = sessionStartedAtRef.current
+            ? Math.round((Date.now() - sessionStartedAtRef.current) / 1000)
+            : 0
+          sessionEventsRef.current.push({
+            type: "attentiveness",
+            timestamp: elapsed,
+            value: Math.round(scoreNum),
+            details: `Attentiveness: ${Math.round(scoreNum)}%`,
+          })
+        }
+
         const now = Date.now()
         setVitalsSyncSnapshot((prev) => ({
           attentiveness: label,

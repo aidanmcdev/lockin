@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     // Edge metrics callback — per-frame computed data
     if (status.ok()) {
         status = container.SetOnEdgeMetricsOutput(
-            [](const presage::physiology::Metrics& metrics) {
+            [](const presage::physiology::Metrics& metrics, int64_t timestamp_ms) {
                 // We just log these — core metrics have the refined vitals
                 return absl::OkStatus();
             }

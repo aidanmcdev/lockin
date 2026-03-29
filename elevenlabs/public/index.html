@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Focus Tracker</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        background: #111;
+        color: white;
+      }
+
+      .wrap {
+        display: flex;
+        justify-content: center;
+        padding: 20px;
+      }
+
+      .stage {
+        position: relative;
+        width: 640px;
+        height: 480px;
+      }
+
+      video,
+      canvas {
+        position: absolute;
+        inset: 0;
+        width: 640px;
+        height: 480px;
+        border-radius: 12px;
+      }
+
+      #status {
+        text-align: center;
+        margin-top: 12px;
+        font-size: 20px;
+      }
+
+      .controls {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      button {
+        padding: 10px 16px;
+        font-size: 16px;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+
+      #debugSpeakBtn {
+        background: #2563eb;
+        color: white;
+      }
+
+      #debugSpeakBtn:hover {
+        background: #1d4ed8;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="stage">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+
+    <div id="status">Starting camera...</div>
+
+    <div class="controls">
+      <button id="debugSpeakBtn">Debug: Force AI Speak</button>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html> 

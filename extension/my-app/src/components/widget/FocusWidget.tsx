@@ -778,9 +778,34 @@ export function FocusWidget({
     distractedSecondsRef.current = 0
     sessionStartedAtRef.current = null
 
+    // Ensure future tabs (and refresh) don't rehydrate into an in-progress session.
+    // Reset persisted state (instead of clearing) so preferences stay in sync across tabs.
+    writePersistedWidgetState({
+      v: 1,
+      focusState: "getting_started",
+      sessionGoalMinutes,
+      sessionElapsedSeconds: 0,
+      graceRemaining: safeGraceTotal,
+      activityMode,
+      minimized,
+      ttsEnabled,
+      settingsOpen: false,
+    })
     setSessionElapsedSeconds(0)
+    setGraceRemaining(safeGraceTotal)
+    setFocusState("getting_started")
+    setSettingsOpen(false)
     handleClose()
-  }, [handleClose, sessionElapsedSeconds, activityMode, token])
+  }, [
+    handleClose,
+    sessionElapsedSeconds,
+    token,
+    sessionGoalMinutes,
+    safeGraceTotal,
+    activityMode,
+    minimized,
+    ttsEnabled,
+  ])
 
   const adjustSessionGoal = useCallback((deltaMinutes: number) => {
     setSessionGoalMinutes((m) =>
@@ -865,7 +890,7 @@ export function FocusWidget({
       >
         {/* Header — title left; TTS, minimize, settings, close on the right */}
         <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2.5">
-          <span className="text-sm font-semibold tracking-tight">Lock-In.tech</span>
+          <span className="text-sm font-semibold tracking-tight">FocusUp.tech</span>
           <div className="flex items-center gap-0.5">
             <Button
               type="button"
@@ -928,7 +953,7 @@ export function FocusWidget({
                 variant="ghost"
                 size="sm"
                 className="size-6 text-muted-foreground hover:text-foreground"
-                onClick={handleClose}
+                onClick={handleEndSession}
               >
                 <X className="size-3.5" />
                 <span className="sr-only">Close widget</span>

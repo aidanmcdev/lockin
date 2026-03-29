@@ -75,8 +75,40 @@ def frames_to_video(frames: list, fps: float) -> str:
     return tmp.name
 
 
+CONVERTIBLE_FORMATS = {".webm", ".mkv", ".avi", ".flv", ".wmv", ".mov", ".ts", ".m4v"}
+
+
+def convert_to_mp4(video_path: str) -> str:
+    """Convert non-mp4 video to mp4 using ffmpeg. Returns new path (or original if already mp4)."""
+    ext = os.path.splitext(video_path)[1].lower()
+    if ext not in CONVERTIBLE_FORMATS:
+        return video_path
+
+    mp4_path = video_path.rsplit(".", 1)[0] + ".mp4"
+    logging.info(f"Converting {ext} to mp4: {video_path} -> {mp4_path}")
+
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", video_path, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", mp4_path],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    if result.returncode != 0:
+        logging.error(f"ffmpeg conversion failed: {result.stderr[-500:]}")
+        raise RuntimeError(f"Failed to convert {ext} to mp4: {result.stderr[-200:]}")
+
+    # Remove original
+    os.unlink(video_path)
+    logging.info(f"Conversion complete: {mp4_path}")
+    return mp4_path
+
+
 def run_extract_vitals(video_path: str, api_key: str, timeout: int = 600) -> dict:
     """Run the SmartSpectra C++ binary on a video file and return parsed JSON results."""
+    # Auto-convert non-mp4 formats
+    video_path = convert_to_mp4(video_path)
+
     if not os.path.exists(EXTRACT_VITALS_BIN):
         raise FileNotFoundError(
             f"SmartSpectra binary not found at {EXTRACT_VITALS_BIN}. "

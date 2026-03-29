@@ -295,22 +295,25 @@ def process_video_async(job_id: str, video_path: str, api_key: str, cleanup: boo
 
 
 def save_uploaded_video(video_file) -> tuple:
-    """Save uploaded video to temp file, return (path, native_fps, frame_count)."""
+    """Save uploaded video to temp file, convert if needed, return (path, native_fps, frame_count)."""
     suffix = os.path.splitext(video_file.filename or "video.mp4")[1]
     tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     video_file.save(tmp.name)
     tmp.close()
 
-    cap = cv2.VideoCapture(tmp.name)
+    # Convert non-mp4 formats (webm, mkv, etc.) to mp4 via ffmpeg
+    video_path = convert_to_mp4(tmp.name)
+
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        os.unlink(tmp.name)
+        os.unlink(video_path)
         raise ValueError("Could not open video file")
 
     native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
-    return tmp.name, native_fps, frame_count
+    return video_path, native_fps, frame_count
 
 
 @app.route("/health", methods=["GET"])

@@ -1,24 +1,25 @@
 """
 Presage API Server - Production mode.
 
-Accepts video snippets or frames via HTTP, preprocesses them, sends to Presage API,
-and returns vitals data (heart rate, respiratory rate, SpO2, HRV, etc.).
+Accepts video snippets via HTTP, processes them through the SmartSpectra C++ SDK,
+and returns vitals data (heart rate, breathing rate, etc.).
+
+The C++ SDK handles all preprocessing and Presage API communication internally.
 
 Endpoints:
-    POST /api/process-frames   - Send multiple frames as multipart images
-    POST /api/process-video    - Send a video file
-    POST /api/process-base64   - Send base64-encoded frames as JSON
-    POST /api/process-sync     - Synchronous version (blocks until results)
+    POST /api/process-video    - Send a video file (async, returns job_id)
+    POST /api/process-sync     - Send a video file (blocks until results)
+    POST /api/process-frames   - Send multiple frames as images (converted to video)
     GET  /api/status/<id>      - Check processing status / get results
     GET  /api/jobs             - List all jobs
     GET  /health               - Health check
 """
 
 import base64
-import io
 import json
 import logging
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -29,10 +30,7 @@ import numpy as np
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from config import HOST, PORT, PRESAGE_API_KEY
-from preprocessing import FrameProcessor
-from presage_client import PresageClient
-from phone_detector import PhoneDetector
+from config import HOST, PORT, PRESAGE_API_KEY, SMARTSPECTRA_BIN
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s [Server] %(message)s",
@@ -42,6 +40,9 @@ logging.basicConfig(
 
 app = Flask(__name__)
 CORS(app)
+
+# Path to the compiled C++ binary
+EXTRACT_VITALS_BIN = SMARTSPECTRA_BIN
 
 # In-memory job store
 jobs = {}
@@ -57,34 +58,75 @@ def decode_image(data: bytes) -> np.ndarray:
     return frame
 
 
-def process_frames_async(job_id: str, frames: list, fps: float, api_key: str):
-    """Background thread: preprocess frames, upload, poll for results."""
+def frames_to_video(frames: list, fps: float) -> str:
+    """Write frames to a temporary video file. Returns the file path."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp.close()
+
+    h, w = frames[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(tmp.name, fourcc, fps, (w, h))
+
+    for frame in frames:
+        writer.write(frame)
+    writer.release()
+
+    return tmp.name
+
+
+def run_extract_vitals(video_path: str, api_key: str, timeout: int = 600) -> dict:
+    """Run the SmartSpectra C++ binary on a video file and return parsed JSON results."""
+    if not os.path.exists(EXTRACT_VITALS_BIN):
+        raise FileNotFoundError(
+            f"SmartSpectra binary not found at {EXTRACT_VITALS_BIN}. "
+            "Run: cd smartspectra && mkdir build && cd build && cmake .. && make"
+        )
+
+    env = os.environ.copy()
+    env["SMARTSPECTRA_API_KEY"] = api_key
+
+    logging.info(f"Running SmartSpectra on {video_path}")
+    result = subprocess.run(
+        [
+            EXTRACT_VITALS_BIN,
+            f"--input_video_path={video_path}",
+            f"--api_key={api_key}",
+            "--headless=true",
+            "--start_with_recording_on=true",
+            "--save_metrics_to_disk=false",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+    # Log stderr (progress info from the C++ binary)
+    if result.stderr:
+        for line in result.stderr.strip().split("\n"):
+            logging.info(f"[SmartSpectra] {line}")
+
+    if result.returncode not in (0, 2):
+        raise RuntimeError(f"SmartSpectra exited with code {result.returncode}: {result.stderr}")
+
+    # Parse JSON from stdout
+    stdout = result.stdout.strip()
+    if not stdout:
+        raise RuntimeError("SmartSpectra produced no output")
+
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"SmartSpectra output not valid JSON: {stdout[:500]}")
+
+
+def process_video_async(job_id: str, video_path: str, api_key: str, cleanup: bool = True):
+    """Background thread: run SmartSpectra on video file."""
     try:
         with jobs_lock:
-            jobs[job_id]["status"] = "preprocessing"
-
-        processor = FrameProcessor(fps=fps)
-        phone_detector = PhoneDetector(fps=fps)
-        frame_interval = 1.0 / fps
-        for i, frame in enumerate(frames):
-            processor.process_frame(frame)
-            phone_detector.detect(frame, i * frame_interval)
-
-        phone_summary = phone_detector.get_summary()
-
-        with jobs_lock:
-            jobs[job_id]["status"] = "uploading"
-            jobs[job_id]["frames_processed"] = len(frames)
-            jobs[job_id]["phone_detection"] = phone_summary
-
-        client = PresageClient(api_key=api_key)
-        compressed = processor.get_compressed_trace()
-
-        with jobs_lock:
-            jobs[job_id]["trace_size_bytes"] = len(compressed)
             jobs[job_id]["status"] = "processing"
 
-        results = client.process_and_get_results(compressed, process_type="all", timeout=300)
+        results = run_extract_vitals(video_path, api_key)
 
         with jobs_lock:
             jobs[job_id]["status"] = "complete"
@@ -95,25 +137,93 @@ def process_frames_async(job_id: str, frames: list, fps: float, api_key: str):
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = str(e)
+    finally:
+        if cleanup and os.path.exists(video_path):
+            os.unlink(video_path)
+
+
+def save_uploaded_video(video_file) -> tuple:
+    """Save uploaded video to temp file, return (path, native_fps, frame_count)."""
+    suffix = os.path.splitext(video_file.filename or "video.mp4")[1]
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    video_file.save(tmp.name)
+    tmp.close()
+
+    cap = cv2.VideoCapture(tmp.name)
+    if not cap.isOpened():
+        os.unlink(tmp.name)
+        raise ValueError("Could not open video file")
+
+    native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+
+    return tmp.name, native_fps, frame_count
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "presage-api"})
+    sdk_ready = os.path.exists(EXTRACT_VITALS_BIN)
+    return jsonify({
+        "status": "ok",
+        "service": "presage-api",
+        "sdk": "smartspectra-cpp",
+        "sdk_binary_found": sdk_ready,
+    })
+
+
+@app.route("/api/process-video", methods=["POST"])
+def process_video():
+    """Accept a video file and process asynchronously."""
+    video_file = request.files.get("video")
+    if not video_file:
+        return jsonify({"error": "No video file. Send as 'video' multipart field."}), 400
+
+    api_key = request.form.get("api_key", PRESAGE_API_KEY)
+    if not api_key:
+        return jsonify({"error": "No API key configured."}), 401
+
+    try:
+        video_path, native_fps, frame_count = save_uploaded_video(video_file)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if frame_count < 5:
+        os.unlink(video_path)
+        return jsonify({"error": f"Video too short ({frame_count} frames), need at least 5."}), 400
+
+    job_id = str(uuid.uuid4())[:8]
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "queued",
+            "created_at": time.time(),
+            "frame_count": frame_count,
+            "native_fps": native_fps,
+        }
+
+    thread = threading.Thread(target=process_video_async, args=(job_id, video_path, api_key))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "queued",
+        "frame_count": frame_count,
+        "message": f"Processing video ({frame_count} frames). Poll /api/status/{job_id} for results.",
+    }), 202
 
 
 @app.route("/api/process-frames", methods=["POST"])
 def process_frames():
-    """Accept multiple image files as multipart form data."""
+    """Accept multiple image files, assemble into video, process."""
     files = request.files.getlist("frames")
     if not files:
         return jsonify({"error": "No frames provided. Send images as 'frames' multipart field."}), 400
 
     fps = float(request.form.get("fps", 10.0))
     api_key = request.form.get("api_key", PRESAGE_API_KEY)
-
     if not api_key:
-        return jsonify({"error": "No API key. Set PRESAGE_API_KEY in .env or pass api_key in form data."}), 401
+        return jsonify({"error": "No API key configured."}), 401
 
     frames = []
     for f in files:
@@ -126,6 +236,9 @@ def process_frames():
     if len(frames) < 5:
         return jsonify({"error": f"Need at least 5 frames, got {len(frames)}"}), 400
 
+    # Convert frames to a temp video for the C++ SDK
+    video_path = frames_to_video(frames, fps)
+
     job_id = str(uuid.uuid4())[:8]
     with jobs_lock:
         jobs[job_id] = {
@@ -135,7 +248,7 @@ def process_frames():
             "fps": fps,
         }
 
-    thread = threading.Thread(target=process_frames_async, args=(job_id, frames, fps, api_key))
+    thread = threading.Thread(target=process_video_async, args=(job_id, video_path, api_key))
     thread.daemon = True
     thread.start()
 
@@ -149,14 +262,13 @@ def process_frames():
 
 @app.route("/api/process-base64", methods=["POST"])
 def process_base64():
-    """Accept base64-encoded frames as JSON."""
+    """Accept base64-encoded frames as JSON, assemble into video, process."""
     data = request.get_json()
     if not data or "frames" not in data:
         return jsonify({"error": "JSON body with 'frames' array of base64 strings required."}), 400
 
     fps = float(data.get("fps", 10.0))
     api_key = data.get("api_key", PRESAGE_API_KEY)
-
     if not api_key:
         return jsonify({"error": "No API key configured."}), 401
 
@@ -172,6 +284,8 @@ def process_base64():
     if len(frames) < 5:
         return jsonify({"error": f"Need at least 5 frames, got {len(frames)}"}), 400
 
+    video_path = frames_to_video(frames, fps)
+
     job_id = str(uuid.uuid4())[:8]
     with jobs_lock:
         jobs[job_id] = {
@@ -181,7 +295,7 @@ def process_base64():
             "fps": fps,
         }
 
-    thread = threading.Thread(target=process_frames_async, args=(job_id, frames, fps, api_key))
+    thread = threading.Thread(target=process_video_async, args=(job_id, video_path, api_key))
     thread.daemon = True
     thread.start()
 
@@ -193,109 +307,22 @@ def process_base64():
     }), 202
 
 
-@app.route("/api/process-video", methods=["POST"])
-def process_video():
-    """Accept a video file, extract frames, preprocess, and process."""
+@app.route("/api/process-sync", methods=["POST"])
+def process_sync():
+    """Synchronous endpoint - send video or frames, wait for results."""
     video_file = request.files.get("video")
-    if not video_file:
-        return jsonify({"error": "No video file. Send as 'video' multipart field."}), 400
+    video_path = None
+    frame_count = 0
 
-    fps = float(request.form.get("fps", 10.0))
     api_key = request.form.get("api_key", PRESAGE_API_KEY)
-
     if not api_key:
         return jsonify({"error": "No API key configured."}), 401
 
-    suffix = os.path.splitext(video_file.filename or "video.mp4")[1]
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    video_file.save(tmp.name)
-    tmp.close()
-
-    cap = cv2.VideoCapture(tmp.name)
-    if not cap.isOpened():
-        os.unlink(tmp.name)
-        return jsonify({"error": "Could not open video file."}), 400
-
-    native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    skip = max(1, round(native_fps / fps))
-
-    frames = []
-    idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if idx % skip == 0:
-            frames.append(frame)
-        idx += 1
-    cap.release()
-    os.unlink(tmp.name)
-
-    if len(frames) < 5:
-        return jsonify({"error": f"Video too short. Extracted {len(frames)} frames, need at least 5."}), 400
-
-    job_id = str(uuid.uuid4())[:8]
-    with jobs_lock:
-        jobs[job_id] = {
-            "status": "queued",
-            "created_at": time.time(),
-            "frame_count": len(frames),
-            "fps": fps,
-            "source": "video",
-            "native_fps": native_fps,
-            "total_video_frames": total_frames,
-        }
-
-    thread = threading.Thread(target=process_frames_async, args=(job_id, frames, fps, api_key))
-    thread.daemon = True
-    thread.start()
-
-    return jsonify({
-        "job_id": job_id,
-        "status": "queued",
-        "frame_count": len(frames),
-        "video_fps": native_fps,
-        "message": f"Processing {len(frames)} frames from video. Poll /api/status/{job_id} for results.",
-    }), 202
-
-
-@app.route("/api/process-sync", methods=["POST"])
-def process_sync():
-    """Synchronous endpoint - send frames or video, wait for results."""
-    # Check for video file first
-    video_file = request.files.get("video")
     if video_file:
-        fps = float(request.form.get("fps", 10.0))
-        api_key = request.form.get("api_key", PRESAGE_API_KEY)
-
-        if not api_key:
-            return jsonify({"error": "No API key configured."}), 401
-
-        suffix = os.path.splitext(video_file.filename or "video.mp4")[1]
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        video_file.save(tmp.name)
-        tmp.close()
-
-        cap = cv2.VideoCapture(tmp.name)
-        if not cap.isOpened():
-            os.unlink(tmp.name)
-            return jsonify({"error": "Could not open video file."}), 400
-
-        native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        skip = max(1, round(native_fps / fps))
-
-        frames = []
-        idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if idx % skip == 0:
-                frames.append(frame)
-            idx += 1
-        cap.release()
-        os.unlink(tmp.name)
+        try:
+            video_path, native_fps, frame_count = save_uploaded_video(video_file)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
     else:
         # Fall back to image frames
         files = request.files.getlist("frames")
@@ -303,11 +330,6 @@ def process_sync():
             return jsonify({"error": "No frames or video provided."}), 400
 
         fps = float(request.form.get("fps", 10.0))
-        api_key = request.form.get("api_key", PRESAGE_API_KEY)
-
-        if not api_key:
-            return jsonify({"error": "No API key configured."}), 401
-
         frames = []
         for f in files:
             try:
@@ -316,31 +338,24 @@ def process_sync():
             except ValueError as e:
                 return jsonify({"error": f"Failed to decode image: {e}"}), 400
 
-    if len(frames) < 5:
-        return jsonify({"error": f"Need at least 5 frames, got {len(frames)}"}), 400
+        if len(frames) < 5:
+            return jsonify({"error": f"Need at least 5 frames, got {len(frames)}"}), 400
 
-    processor = FrameProcessor(fps=fps)
-    phone_detector = PhoneDetector(fps=fps)
-    frame_interval = 1.0 / fps
-    for i, frame in enumerate(frames):
-        processor.process_frame(frame)
-        phone_detector.detect(frame, i * frame_interval)
-
-    phone_summary = phone_detector.get_summary()
-
-    client = PresageClient(api_key=api_key)
-    compressed = processor.get_compressed_trace()
+        video_path = frames_to_video(frames, fps)
+        frame_count = len(frames)
 
     try:
-        results = client.process_and_get_results(compressed, process_type="all", timeout=300)
+        results = run_extract_vitals(video_path, api_key)
         return jsonify({
-            "status": "complete",
+            "status": results.get("status", "complete"),
             "results": results,
-            "phone_detection": phone_summary,
-            "frames_processed": len(frames),
+            "frames_processed": frame_count,
         })
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "phone_detection": phone_summary}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
+    finally:
+        if video_path and os.path.exists(video_path):
+            os.unlink(video_path)
 
 
 @app.route("/api/status/<job_id>", methods=["GET"])
@@ -367,5 +382,8 @@ def list_jobs():
 if __name__ == "__main__":
     if not PRESAGE_API_KEY:
         logging.warning("PRESAGE_API_KEY not set! Set it in .env or pass per-request.")
+    if not os.path.exists(EXTRACT_VITALS_BIN):
+        logging.warning(f"SmartSpectra binary not found at {EXTRACT_VITALS_BIN}")
+        logging.warning("Build it: cd smartspectra && mkdir build && cd build && cmake .. && make")
     logging.info(f"Starting Presage API server on {HOST}:{PORT}")
     app.run(host=HOST, port=PORT, debug=False, threaded=True)

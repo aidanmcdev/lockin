@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
-#  Presage API — Full EC2 Deployment Script (Debian / Ubuntu)
-#  Target: AWS Free Tier t2.micro or t3.micro
+#  Presage API — Full EC2 Deployment Script (Ubuntu 22.04)
+#  Uses SmartSpectra C++ SDK for vitals extraction.
 #
 #  Usage:
-#    1. Launch an EC2 instance (Ubuntu 22.04+ AMI)
+#    1. Launch an EC2 instance (Ubuntu 22.04 AMI, t2.small+ recommended)
 #    2. SSH in: ssh -i your-key.pem ubuntu@<public-ip>
 #    3. Clone the repo and run:
 #         cd presageAI
@@ -26,24 +26,71 @@ PORT="${PORT:-5000}"
 
 echo -e "${GREEN}"
 echo "============================================="
-echo "  Presage API — EC2 Deployment"
+echo "  Presage API — EC2 Deployment (C++ SDK)"
 echo "============================================="
 echo -e "${NC}"
 
 # ------------------------------------------------------------------
 # 1. System dependencies
 # ------------------------------------------------------------------
-echo -e "${YELLOW}[1/6] Installing system dependencies...${NC}"
+echo -e "${YELLOW}[1/8] Installing system dependencies...${NC}"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
     python3 python3-pip python3-venv python3-dev \
+    build-essential git curl gpg \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
-    ffmpeg curl git
+    libcurl4-openssl-dev libssl-dev pkg-config \
+    libv4l-dev libgles2-mesa-dev libunwind-dev \
+    ffmpeg
 
 # ------------------------------------------------------------------
-# 2. Swap file (t2.micro only has 1GB RAM — mediapipe needs more)
+# 2. Install CMake 3.27+
 # ------------------------------------------------------------------
-echo -e "${YELLOW}[2/6] Setting up swap (2GB)...${NC}"
+echo -e "${YELLOW}[2/8] Installing CMake 3.27...${NC}"
+CMAKE_VERSION=$(cmake --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+' || echo "0.0")
+if [ "$(echo "$CMAKE_VERSION 3.27" | awk '{if ($1 >= $2) print 1; else print 0}')" = "0" ]; then
+    curl -sL -o /tmp/cmake.sh \
+        https://github.com/Kitware/CMake/releases/download/v3.27.0/cmake-3.27.0-linux-x86_64.sh
+    chmod +x /tmp/cmake.sh
+    sudo /tmp/cmake.sh --skip-license --prefix=/usr/local
+    rm /tmp/cmake.sh
+    echo "  CMake $(cmake --version | head -1) installed"
+else
+    echo "  CMake $CMAKE_VERSION already sufficient"
+fi
+
+# ------------------------------------------------------------------
+# 3. Install SmartSpectra C++ SDK
+# ------------------------------------------------------------------
+echo -e "${YELLOW}[3/8] Installing SmartSpectra C++ SDK...${NC}"
+if ! dpkg -s libsmartspectra-dev &>/dev/null; then
+    curl -s "https://presage-security.github.io/PPA/KEY.gpg" | gpg --dearmor | \
+        sudo tee /etc/apt/trusted.gpg.d/presage-technologies.gpg >/dev/null
+    sudo curl -s --compressed -o /etc/apt/sources.list.d/presage-technologies.list \
+        "https://presage-security.github.io/PPA/presage-technologies.list"
+    sudo apt-get update -qq
+    sudo apt-get install -y libsmartspectra-dev
+    echo "  SmartSpectra SDK installed"
+else
+    echo "  SmartSpectra SDK already installed"
+fi
+
+# ------------------------------------------------------------------
+# 4. Build the C++ vitals extractor
+# ------------------------------------------------------------------
+echo -e "${YELLOW}[4/8] Building C++ vitals extractor...${NC}"
+cd "$APP_DIR/smartspectra"
+mkdir -p build
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+echo "  Built: $APP_DIR/smartspectra/build/extract_vitals"
+cd "$APP_DIR"
+
+# ------------------------------------------------------------------
+# 5. Swap file (t2.micro/small only has 1-2GB RAM)
+# ------------------------------------------------------------------
+echo -e "${YELLOW}[5/8] Setting up swap (4GB)...${NC}"
 if [ ! -f /swapfile ]; then
     sudo fallocate -l 4G /swapfile
     sudo chmod 600 /swapfile
@@ -56,32 +103,21 @@ else
 fi
 
 # ------------------------------------------------------------------
-# 3. Python virtual environment + dependencies
+# 6. Python virtual environment (thin HTTP layer only)
 # ------------------------------------------------------------------
-echo -e "${YELLOW}[3/6] Setting up Python environment...${NC}"
+echo -e "${YELLOW}[6/8] Setting up Python environment...${NC}"
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
 pip install --upgrade pip
-
-# Install packages one at a time to avoid OOM on t2.micro (1GB RAM).
-# mediapipe and opencv are the heaviest — installing them separately
-# prevents pip from trying to resolve everything in one huge pass.
-echo "  Installing packages individually (this takes a few minutes on t2.micro)..."
-while IFS= read -r pkg || [ -n "$pkg" ]; do
-    pkg=$(echo "$pkg" | xargs)  # trim whitespace
-    [ -z "$pkg" ] && continue
-    [ "${pkg:0:1}" = "#" ] && continue
-    echo "  -> $pkg"
-    pip install "$pkg" || { echo -e "${RED}  Failed to install $pkg${NC}"; exit 1; }
-done < "$APP_DIR/requirements.txt"
+pip install -r "$APP_DIR/requirements.txt"
 
 echo "  Installed $(pip list --format=columns | wc -l) packages"
 
 # ------------------------------------------------------------------
-# 4. Environment file
+# 7. Environment file
 # ------------------------------------------------------------------
-echo -e "${YELLOW}[4/6] Configuring environment...${NC}"
+echo -e "${YELLOW}[7/8] Configuring environment...${NC}"
 if [ ! -f "$APP_DIR/.env" ]; then
     cp "$APP_DIR/.env.example" "$APP_DIR/.env"
     echo ""
@@ -93,21 +129,21 @@ else
 fi
 
 # ------------------------------------------------------------------
-# 5. Systemd service
+# 8. Systemd service
 # ------------------------------------------------------------------
-echo -e "${YELLOW}[5/6] Installing systemd service...${NC}"
+echo -e "${YELLOW}[8/8] Installing systemd service...${NC}"
 
 CURRENT_USER=$(whoami)
 cat > /tmp/$SERVICE_NAME.service <<SERVICEEOF
 [Unit]
-Description=Presage API Server
+Description=Presage API Server (SmartSpectra C++ SDK)
 After=network.target
 
 [Service]
 Type=simple
 User=$CURRENT_USER
 WorkingDirectory=$APP_DIR
-Environment=PATH=$VENV_DIR/bin:/usr/bin
+Environment=PATH=$VENV_DIR/bin:$APP_DIR/smartspectra/build:/usr/bin
 EnvironmentFile=$APP_DIR/.env
 ExecStart=$VENV_DIR/bin/gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 600 server:app
 Restart=always
@@ -125,14 +161,11 @@ sudo systemctl enable $SERVICE_NAME
 echo "  Service installed and enabled"
 
 # ------------------------------------------------------------------
-# 6. Firewall (if ufw is active)
+# Firewall
 # ------------------------------------------------------------------
-echo -e "${YELLOW}[6/6] Checking firewall...${NC}"
 if command -v ufw &> /dev/null && sudo ufw status | grep -q "active"; then
     sudo ufw allow $PORT/tcp
     echo "  Opened port $PORT in ufw"
-else
-    echo "  ufw not active (make sure EC2 security group allows port $PORT)"
 fi
 
 # ------------------------------------------------------------------
@@ -159,9 +192,5 @@ echo "  4. View logs:"
 echo "       sudo journalctl -u $SERVICE_NAME -f"
 echo ""
 echo "  5. Test from your machine:"
-echo "       curl http://<YOUR-EC2-PUBLIC-IP>:$PORT/health"
-echo ""
-echo "  Manual run (for debugging):"
-echo "       source $VENV_DIR/bin/activate"
-echo "       python main.py server --port $PORT"
+echo "       curl.exe -X POST http://<EC2-IP>:$PORT/api/process-sync -F \"video=@your_video.mp4\""
 echo ""

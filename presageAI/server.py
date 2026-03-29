@@ -119,82 +119,119 @@ def run_extract_vitals(video_path: str, api_key: str, timeout: int = 600) -> dic
     return extract_vitals_summary(raw)
 
 
-def extract_vitals_summary(raw: dict) -> dict:
-    """Parse SDK output and extract pulse rate, breathing rate, HRV, and stress."""
-    if raw.get("status") != "complete":
-        return raw
+def _extract_from_snapshot(snapshot: dict) -> dict:
+    """Extract vitals from a single SDK metrics snapshot."""
+    vitals = {}
 
-    # Use the latest snapshot which has the most accumulated data
-    latest = raw.get("latest", {})
-
-    vitals = {
-        "pulse_rate_bpm": None,
-        "breathing_rate_bpm": None,
-        "hrv_ms": None,
-        "stress_index": None,
-    }
-
-    # Extract pulse rate
-    pulse = latest.get("pulse", {})
+    # Pulse rate
+    pulse = snapshot.get("pulse", {})
     rate_list = pulse.get("rate", [])
     if rate_list:
         vitals["pulse_rate_bpm"] = rate_list[-1].get("value")
-    rate_conf = pulse.get("rateConfidence", [])
-    if rate_conf:
-        vitals["pulse_rate_confidence"] = rate_conf[-1].get("value")
+        # Confidence
+        rate_conf = pulse.get("rateConfidence", [])
+        if rate_conf:
+            vitals["pulse_rate_confidence"] = rate_conf[-1].get("value")
 
-    # Extract HRV from pulse
-    hrv_list = pulse.get("hrv", pulse.get("heartRateVariability", []))
-    if isinstance(hrv_list, list) and hrv_list:
-        vitals["hrv_ms"] = hrv_list[-1].get("value")
-    elif isinstance(hrv_list, dict):
-        # might be nested
-        sdnn = hrv_list.get("sdnn", hrv_list.get("rmssd", []))
-        if isinstance(sdnn, list) and sdnn:
-            vitals["hrv_ms"] = sdnn[-1].get("value")
+    # HRV — could be under several keys
+    for hrv_key in ("hrv", "heartRateVariability", "pulseRateVariability"):
+        hrv_data = pulse.get(hrv_key, {})
+        if isinstance(hrv_data, list) and hrv_data:
+            vitals["hrv_ms"] = hrv_data[-1].get("value")
+            break
+        elif isinstance(hrv_data, dict):
+            for sub_key in ("sdnn", "rmssd", "value", "index"):
+                sub = hrv_data.get(sub_key, [])
+                if isinstance(sub, list) and sub:
+                    vitals["hrv_ms"] = sub[-1].get("value")
+                    break
+                elif isinstance(sub, (int, float)) and sub > 0:
+                    vitals["hrv_ms"] = sub
+                    break
+            if "hrv_ms" in vitals:
+                break
 
-    # Extract breathing rate
-    breathing = latest.get("breathing", {})
+    # Breathing rate
+    breathing = snapshot.get("breathing", {})
     br_list = breathing.get("rate", [])
     if br_list:
         vitals["breathing_rate_bpm"] = br_list[-1].get("value")
-    br_conf = breathing.get("rateConfidence", [])
-    if br_conf:
-        vitals["breathing_rate_confidence"] = br_conf[-1].get("value")
+        br_conf = breathing.get("rateConfidence", [])
+        if br_conf:
+            vitals["breathing_rate_confidence"] = br_conf[-1].get("value")
 
-    # Extract stress index (may be under different keys)
-    stress = latest.get("stress", latest.get("stressIndex", {}))
-    if isinstance(stress, dict):
-        stress_val = stress.get("value", stress.get("index", []))
-        if isinstance(stress_val, list) and stress_val:
-            vitals["stress_index"] = stress_val[-1].get("value")
-        elif isinstance(stress_val, (int, float)):
-            vitals["stress_index"] = stress_val
-    elif isinstance(stress, list) and stress:
-        vitals["stress_index"] = stress[-1].get("value")
+    # Stress index
+    for stress_key in ("stress", "stressIndex", "ansIndex"):
+        stress = snapshot.get(stress_key)
+        if stress is None:
+            continue
+        if isinstance(stress, dict):
+            for sub_key in ("value", "index", "level"):
+                sv = stress.get(sub_key, [])
+                if isinstance(sv, list) and sv:
+                    vitals["stress_index"] = sv[-1].get("value")
+                    break
+                elif isinstance(sv, (int, float)):
+                    vitals["stress_index"] = sv
+                    break
+        elif isinstance(stress, list) and stress:
+            vitals["stress_index"] = stress[-1].get("value")
+        if "stress_index" in vitals:
+            break
 
-    # Blood pressure if available
-    bp = latest.get("bloodPressure", {})
-    systolic = bp.get("systolic", [])
-    diastolic = bp.get("diastolic", [])
-    if systolic:
-        vitals["blood_pressure_systolic"] = systolic[-1].get("value")
-    if diastolic:
-        vitals["blood_pressure_diastolic"] = diastolic[-1].get("value")
+    return vitals
 
-    # Metadata
+
+def extract_vitals_summary(raw: dict) -> dict:
+    """Parse SDK output, scan ALL snapshots for the best vitals data."""
+    if raw.get("status") != "complete":
+        return raw
+
+    all_snapshots = raw.get("all_snapshots", [])
+    latest = raw.get("latest", {})
+
+    # Scan all snapshots for the one with the most vitals populated
+    best_vitals = {}
+    best_score = 0
+
+    candidates = all_snapshots if all_snapshots else [latest]
+    for snap in candidates:
+        v = _extract_from_snapshot(snap)
+        score = sum(1 for val in v.values() if val is not None)
+        if score > best_score:
+            best_score = score
+            best_vitals = v
+
+    # Fill in defaults for missing fields
+    result_vitals = {
+        "pulse_rate_bpm": best_vitals.get("pulse_rate_bpm"),
+        "breathing_rate_bpm": best_vitals.get("breathing_rate_bpm"),
+        "hrv_ms": best_vitals.get("hrv_ms"),
+        "stress_index": best_vitals.get("stress_index"),
+    }
+
+    # Add confidence if available
+    if "pulse_rate_confidence" in best_vitals:
+        result_vitals["pulse_rate_confidence"] = best_vitals["pulse_rate_confidence"]
+    if "breathing_rate_confidence" in best_vitals:
+        result_vitals["breathing_rate_confidence"] = best_vitals["breathing_rate_confidence"]
+
+    # Metadata from latest
     meta = latest.get("metadata", {})
 
+    # Check if we got any actual data
+    has_data = any(v is not None for v in result_vitals.values())
+
     return {
-        "status": "complete",
-        "vitals": vitals,
+        "status": "complete" if has_data else "insufficient_data",
+        "vitals": result_vitals,
         "metadata": {
             "api_version": meta.get("apiVersion"),
             "video_id": meta.get("id"),
             "frame_count": meta.get("frameCount"),
         },
         "snapshot_count": raw.get("snapshot_count", 1),
-        "raw_latest": latest,  # full data for debugging
+        "message": None if has_data else "Video may be too short. Use 30+ seconds with a clear, steady face.",
     }
 
 

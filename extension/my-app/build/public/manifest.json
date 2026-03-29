@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "React Chrome Extension",
+  "version": "1.0.0",
+  "description": "A simple React app as a Chrome extension",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "action": {
+    "default_title": "Lock-In — open panel"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content-frame.html",
+        "index.html",
+        "assets/*",
+        "mediapipe-wasm/*",
+        "mediapipe-models/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "permissions": ["tabs", "activeTab", "scripting", "camera"],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://3.237.198.19:5000/*"
+  ]
+}

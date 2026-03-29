@@ -172,11 +172,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Output the latest (most complete) snapshot plus count
+    // Output all snapshots plus the latest
     std::ostringstream out;
     out << "{";
     out << "\"status\": \"complete\",";
     out << "\"snapshot_count\": " << collector.snapshots.size() << ",";
+    out << "\"all_snapshots\": [";
+    for (size_t i = 0; i < collector.snapshots.size(); i++) {
+        if (i > 0) out << ",";
+        out << collector.snapshots[i];
+    }
+    out << "],";
     out << "\"latest\": " << collector.latest_raw;
     out << "}";
 

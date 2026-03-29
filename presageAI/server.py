@@ -31,6 +31,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from config import HOST, PORT, PRESAGE_API_KEY, SMARTSPECTRA_BIN
+from attentiveness import compute_attentiveness
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s [Server] %(message)s",
@@ -222,9 +223,13 @@ def extract_vitals_summary(raw: dict) -> dict:
     # Check if we got any actual data
     has_data = any(v is not None for v in result_vitals.values())
 
+    # Compute attentiveness score from all snapshots
+    attentiveness = compute_attentiveness(candidates, meta)
+
     return {
         "status": "complete" if has_data else "insufficient_data",
         "vitals": result_vitals,
+        "attentiveness": attentiveness,
         "metadata": {
             "api_version": meta.get("apiVersion"),
             "video_id": meta.get("id"),

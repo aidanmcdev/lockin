@@ -29,6 +29,7 @@
 #include <smartspectra/container/settings.hpp>
 #include <smartspectra/video_source/camera/camera.hpp>
 #include <google/protobuf/util/json_util.h>
+#include <opencv2/opencv.hpp>
 
 namespace spectra = presage::smartspectra;
 namespace settings = presage::smartspectra::container::settings;

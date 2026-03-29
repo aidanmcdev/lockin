@@ -4,8 +4,8 @@
  * Processes a video file through the Presage SmartSpectra C++ SDK
  * and outputs vitals as JSON to stdout.
  *
- * Uses Spot mode — processes the entire video as one batch for best results.
- * Extracts: pulse rate, breathing rate, HRV, stress index.
+ * Uses Continuous mode with a large buffer to get meaningful vitals.
+ * Extracts: pulse rate, breathing rate, HRV, stress index, face data.
  *
  * Usage:
  *   ./extract_vitals --input_video_path=/path/to/video.mp4 --api_key=YOUR_KEY
@@ -36,7 +36,7 @@ namespace settings = presage::smartspectra::container::settings;
 
 ABSL_FLAG(std::string, input_video_path, "", "Path to video file to process.");
 ABSL_FLAG(std::string, api_key, "", "Presage API key. Falls back to SMARTSPECTRA_API_KEY env var.");
-ABSL_FLAG(double, spot_duration, 0, "Spot duration in seconds. 0 = auto (use video length).");
+ABSL_FLAG(double, buffer_duration, 30.0, "Preprocessed data buffer duration in seconds.");
 
 // Holds metrics received during processing
 struct MetricsCollector {
@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
 
     std::string video_path = absl::GetFlag(FLAGS_input_video_path);
     std::string api_key = absl::GetFlag(FLAGS_api_key);
-    double spot_duration = absl::GetFlag(FLAGS_spot_duration);
+    double buffer_duration = absl::GetFlag(FLAGS_buffer_duration);
 
     if (api_key.empty()) {
         const char* env_key = std::getenv("SMARTSPECTRA_API_KEY");
@@ -77,23 +77,24 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // Get video duration to set spot_duration if not specified
-    if (spot_duration <= 0) {
+    // Auto-detect video duration and set buffer to match (process as one chunk)
+    {
         cv::VideoCapture cap(video_path);
         if (cap.isOpened()) {
             double fps = cap.get(cv::CAP_PROP_FPS);
             double frame_count = cap.get(cv::CAP_PROP_FRAME_COUNT);
             if (fps > 0 && frame_count > 0) {
-                spot_duration = frame_count / fps;
+                double video_duration = frame_count / fps;
+                // Set buffer to entire video duration + margin so it sends as one chunk
+                buffer_duration = video_duration + 5.0;
+                LOG(INFO) << "Video duration: " << video_duration << "s, buffer set to: " << buffer_duration << "s";
             }
             cap.release();
         }
-        if (spot_duration <= 0) spot_duration = 60.0;
-        LOG(INFO) << "Auto spot duration: " << spot_duration << "s";
     }
 
-    // Use Spot mode — processes entire video as one batch
-    settings::Settings<settings::OperationMode::Spot, settings::IntegrationMode::Rest> s;
+    // Continuous mode with large buffer — sends all data as one chunk
+    settings::Settings<settings::OperationMode::Continuous, settings::IntegrationMode::Rest> s;
     s.video_source.input_video_path = video_path;
     s.headless = true;
     s.start_with_recording_on = true;
@@ -103,13 +104,13 @@ int main(int argc, char** argv) {
     s.enable_edge_metrics = false;
     s.verbosity_level = 1;
 
-    // Spot mode: process the full video duration at once
-    s.spot.spot_duration_s = spot_duration;
+    // Set buffer to entire video so it processes as one batch
+    s.continuous.preprocessed_data_buffer_duration_s = buffer_duration;
 
     // REST integration
     s.integration.api_key = api_key;
 
-    spectra::container::CpuSpotRestForegroundContainer container(s);
+    spectra::container::CpuContinuousRestForegroundContainer container(s);
 
     MetricsCollector collector;
 

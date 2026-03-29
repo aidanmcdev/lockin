@@ -8,6 +8,12 @@ export interface ISessionEvent {
   value?: number; // 0-100 attentiveness score at this point
 }
 
+export interface ISiteScoreEntry {
+  url: string;
+  score: number;
+  visitedAt: number;
+}
+
 export interface ISession {
   _id: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
@@ -19,6 +25,7 @@ export interface ISession {
   focusedSeconds: number;
   distractedSeconds: number;
   events: ISessionEvent[];
+  siteScores: ISiteScoreEntry[];
 }
 
 const eventSchema = new mongoose.Schema(
@@ -46,6 +53,16 @@ const sessionSchema = new mongoose.Schema<ISession>({
   focusedSeconds: { type: Number, default: 0 },
   distractedSeconds: { type: Number, default: 0 },
   events: { type: [eventSchema], default: [] },
+  siteScores: {
+    type: [
+      {
+        url: { type: String, required: true },
+        score: { type: Number, required: true, min: 0, max: 10 },
+        visitedAt: { type: Number, required: true },
+      },
+    ],
+    default: [],
+  },
 });
 
 sessionSchema.index({ userId: 1, date: -1 });

@@ -91,6 +91,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     showOrRemountPanel()
     sendResponse({ ok: true })
   }
+
+  if (message?.type === "LOCKIN_GET_PAGE_CONTENT") {
+    const title = document.title || ""
+    const metaDesc =
+      document.querySelector('meta[name="description"]')?.getAttribute("content") || ""
+    const bodyText = (document.body?.innerText || "").slice(0, 2000)
+    const url = window.location.href
+
+    sendResponse({ ok: true, title, metaDesc, bodyText, url })
+  }
+
   return true
 })
 

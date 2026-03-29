@@ -22,6 +22,7 @@ export async function POST(req: NextRequest) {
       focusedSeconds: body.focusedSeconds || 0,
       distractedSeconds: body.distractedSeconds || 0,
       events: body.events || [],
+      siteScores: body.siteScores || [],
     });
 
     return NextResponse.json(session, { status: 201 });

@@ -9,6 +9,7 @@ interface StatsCardsProps {
     totalFocusMinutes: number;
     currentStreak: number;
     totalPhonePickups?: number;
+    avgProductivity?: number | null;
   };
 }
 
@@ -51,9 +52,18 @@ const cards = [
   },
 ];
 
+const productivityCard = {
+  label: "Avg Productivity",
+  icon: "📊",
+  gradient: "from-cyan-500/10 to-teal-600/5",
+  border: "border-cyan-200",
+  format: (v: number) => `${v.toFixed(1)}/10`,
+};
+
 export default function StatsCards({ stats }: StatsCardsProps) {
+  const showProductivity = stats.avgProductivity != null;
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className={`grid grid-cols-2 ${showProductivity ? "lg:grid-cols-5" : "lg:grid-cols-4"} gap-4`}>
       {cards.map((card) => (
         <div
           key={card.key}
@@ -68,6 +78,19 @@ export default function StatsCards({ stats }: StatsCardsProps) {
           </p>
         </div>
       ))}
+      {showProductivity && (
+        <div
+          className={`p-5 rounded-2xl bg-gradient-to-br ${productivityCard.gradient} border ${productivityCard.border} shadow-sm hover:shadow-md hover:scale-[1.02] transition-all duration-200 cursor-default`}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm text-foreground/50 font-medium">{productivityCard.label}</p>
+            <span className="text-2xl">{productivityCard.icon}</span>
+          </div>
+          <p className="text-3xl font-bold text-foreground">
+            <AnimatedNumber value={stats.avgProductivity!} format={productivityCard.format} />
+          </p>
+        </div>
+      )}
     </div>
   );
 }
